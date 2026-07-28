@@ -1,3 +1,8 @@
+---
+name: vault-save
+description: Export a Claude-generated markdown document to the Obsidian vault (claude-docs/) with structured frontmatter, filename sanitization, and collision checks. Use when asked to save, export, or store a document to the vault or notes ("save this to my vault", "export this spec", "add this to Obsidian").
+---
+
 <!-- BEGIN claude-vault-capture: vault-save -->
 # /vault-save — Export a document to the Obsidian vault
 

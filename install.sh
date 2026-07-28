@@ -163,34 +163,15 @@ VAULT_SAVE_TRIGGER_PATCH="$REPO/skill-patches/global-claude-md.vault-save-trigge
 
 # ── 5b. Install / update vault-save skill ────────────────────────────────────
 # vault-save is different from daily/weekly: the patch IS the full skill file,
-# not an injection into a foreign SKILL.md. So we write it on first install and
-# do a marker-bounded replace on updates. Either way, placeholders are substituted.
+# not an injection into a foreign SKILL.md, so every run overwrites the whole
+# file. The patch's YAML frontmatter must stay at byte 0 for Claude Code to
+# parse the skill description — never wrap the file in additional markers.
 if [[ -f "$VAULT_SAVE_PATCH" ]]; then
     VAULT_SAVE_SKILL="$CLAUDE_DIR/skills/vault-save/SKILL.md"
     mkdir -p "$(dirname "$VAULT_SAVE_SKILL")"
-    VAULT_SAVE_BEGIN="<!-- BEGIN claude-vault-capture: vault-save -->"
-    VAULT_SAVE_END="<!-- END claude-vault-capture: vault-save -->"
     vault_save_content="$(substitute_paths "$(<"$VAULT_SAVE_PATCH")")"
-    if [[ ! -f "$VAULT_SAVE_SKILL" ]]; then
-        printf '%s\n' "$vault_save_content" > "$VAULT_SAVE_SKILL"
-        echo "Created vault-save skill at $VAULT_SAVE_SKILL"
-    elif grep -qF "$VAULT_SAVE_BEGIN" "$VAULT_SAVE_SKILL"; then
-        # Marker-bounded replace (standard update path)
-        python3 - "$VAULT_SAVE_SKILL" "$VAULT_SAVE_BEGIN" "$VAULT_SAVE_END" "$vault_save_content" <<'PYEOF'
-import sys, re
-path, begin, end, content = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-text = open(path).read()
-new_block = f"{begin}\n{content}\n{end}"
-pattern = re.escape(begin) + r".*?" + re.escape(end)
-updated = re.sub(pattern, new_block, text, flags=re.DOTALL)
-open(path, "w").write(updated)
-PYEOF
-        echo "Updated vault-save skill at $VAULT_SAVE_SKILL"
-    else
-        # Old install without markers — overwrite to adopt marker format
-        printf '%s\n' "$vault_save_content" > "$VAULT_SAVE_SKILL"
-        echo "Migrated vault-save skill to marker-bounded format at $VAULT_SAVE_SKILL"
-    fi
+    printf '%s\n' "$vault_save_content" > "$VAULT_SAVE_SKILL"
+    echo "Installed vault-save skill at $VAULT_SAVE_SKILL"
 else
     echo "WARNING: $VAULT_SAVE_PATCH not found — skipping vault-save skill creation"
 fi
