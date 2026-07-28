@@ -67,6 +67,24 @@ def test_prose_with_stray_braces_still_malformed(monkeypatch):
         curate._call_path_a("scrubbed", PROMPTS)
 
 
+def test_salvaged_usage_none_propagates_as_unknown(monkeypatch):
+    """A salvaged subscription reply carries usage=None; the artifact must log
+    null (unknown), never an understated 0-token / $0 row."""
+    artifact = {"title": "T", "type": "gotcha", "body": "B"}
+
+    def _fake(model, max_tokens, system_prompt, user_text):
+        return (json.dumps(artifact), None, None)
+
+    monkeypatch.setattr(curate, "_invoke_model", _fake)
+
+    result = curate._call_path_a("scrubbed", PROMPTS)
+
+    assert result["title"] == "T"
+    assert result["tokens_in"] is None
+    assert result["tokens_out"] is None
+    assert result["cost_usd"] is None
+
+
 def test_subscription_directive_pins_output_contract():
     """The directive must state the reply contract explicitly: a single JSON
     object or the word null, and never an echo of the transcript/delimiters —

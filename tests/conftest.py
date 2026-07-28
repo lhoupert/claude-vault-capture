@@ -142,26 +142,12 @@ def temp_vault(tmp_path):
 def run_main(monkeypatch, temp_vault):
     """Invoke curate.main() against the temp vault, returning the parsed log entries.
 
-    main() takes no vault/log/index arguments — its run_capture call uses the
-    module-level defaults (VAULT_DIR resolves CAPTURE_VAULT_DIR, else ~/Obsidian).
-    We therefore wrap run_capture (rather than patch the module constant) so the
-    temp paths are injected: main() resolves run_capture as a module global at
-    call time, so the wrapper is picked up.
+    curate resolves VAULT_DIR/LOG_PATH/INDEX_PATH at call time, so pointing the
+    module globals at temp_vault covers every path main() can take: run_capture's
+    defaults and the direct transcript_missing append_log alike.
     """
     import curate
 
-    real_run_capture = curate.run_capture
-
-    def _wrapped(**kwargs):
-        kwargs.setdefault("vault_dir", str(temp_vault.vault_dir))
-        kwargs.setdefault("log_path", temp_vault.log_path)
-        kwargs.setdefault("index_path", temp_vault.index_path)
-        return real_run_capture(**kwargs)
-
-    monkeypatch.setattr(curate, "run_capture", _wrapped)
-    # main() logs transcript_missing directly (not via run_capture); point the
-    # module globals at the same temp paths so those entries land in
-    # temp_vault.log_path and are visible to the test's log assertions.
     monkeypatch.setattr(curate, "LOG_PATH", temp_vault.log_path)
     monkeypatch.setattr(curate, "INDEX_PATH", temp_vault.index_path)
     monkeypatch.setattr(curate, "VAULT_DIR", temp_vault.vault_dir)
