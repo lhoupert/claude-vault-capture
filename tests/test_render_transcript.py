@@ -7,11 +7,6 @@ only the text-only `content`, this renderer surfaces tool activity: commands run
 caps tool volume so the enriched input never blows the token guard.
 """
 
-import pathlib
-import sys
-
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "hooks"))
-
 import curate
 from curate import render_transcript
 

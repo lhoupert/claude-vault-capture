@@ -19,6 +19,11 @@ if [[ -f "$REPO/capture.env" ]]; then
     set +a
 fi
 
+# Every branch below may log; guarantee the destination and one coherent
+# timestamp up front (each $(date) is a fork — this is the <200ms close path).
+mkdir -p "$(dirname "$HOOKS_LOG")"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 # Read hook JSON from stdin
 HOOK_JSON=$(cat)
 
@@ -35,9 +40,8 @@ fi
 # Guard: refuse to run unconfigured. install.sh writes CAPTURE_VAULT_DIR into
 # capture.env; without it we have no destination, so log a marker and exit cleanly.
 if [[ -z "${CAPTURE_VAULT_DIR:-}" ]]; then
-    mkdir -p "$(dirname "$HOOKS_LOG")"
     printf 'CAPTURE_NOT_CONFIGURED\t%s\tCAPTURE_VAULT_DIR unset — run install.sh\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$HOOKS_LOG"
+        "$NOW" >> "$HOOKS_LOG"
     exit 0
 fi
 
@@ -58,8 +62,7 @@ elif [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$HOME/.claude_vault_token" ]]; then
 fi
 
 # Ground-truth marker BEFORE backgrounding (pre-log crash gap detection)
-mkdir -p "$(dirname "$HOOKS_LOG")"
-printf 'SESSION_END_RECEIVED\t%s\t%s\n' "$SESSION_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$HOOKS_LOG"
+printf 'SESSION_END_RECEIVED\t%s\t%s\n' "$SESSION_ID" "$NOW" >> "$HOOKS_LOG"
 
 # Deploy-drift guard: the June–July timeout outage was a checkout stuck behind
 # origin/main, so the running code silently wasn't the merged code. Log the
@@ -74,7 +77,7 @@ elif git -C "$REPO" rev-parse --verify -q origin/main >/dev/null 2>&1 \
     DEPLOY_STATE="STALE_DEPLOY(behind origin/main as last fetched)"
 fi
 printf 'CAPTURE_DEPLOY\t%s\t%s\t%s\n' "$DEPLOY_SHA" "$DEPLOY_STATE" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$HOOKS_LOG"
+    "$NOW" >> "$HOOKS_LOG"
 
 # Background curate.py — detached, stdout/stderr → hooks.log
 nohup "$VENV_PYTHON" "$CURATE" "$TRANSCRIPT_PATH" "$SESSION_ID" "$CWD" \

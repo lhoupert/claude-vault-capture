@@ -22,8 +22,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-GLOBAL_CLAUDE_MD="${FAKE_GLOBAL_CLAUDE_MD:-$HOME/.claude/CLAUDE.md}"
-
 # ── Resolve the vault path ────────────────────────────────────────────────────
 # Priority: --vault arg → CAPTURE_VAULT_DIR env → existing capture.env (idempotent
 # re-run) → interactive prompt → error with guidance.
@@ -46,19 +44,21 @@ resolve_vault() {
     exit 1
 }
 
-# ── Smoke-test mode: accept overrides via env vars ────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# Each FAKE_* fallback exists for the install smoke test (eval/run-install-smoke.sh),
+# which redirects every write into temp dirs. FAKE_* is that harness's contract
+# only: outside smoke mode a stray export must never redirect a real install.
+if [[ "$SMOKE" != "--smoke-test-mode" ]]; then
+    unset FAKE_HOME FAKE_VAULT FAKE_SETTINGS FAKE_START_DATE_PATH FAKE_CONFIG FAKE_GLOBAL_CLAUDE_MD
+fi
+CLAUDE_DIR="${FAKE_HOME:-$HOME}/.claude"
+SETTINGS="${FAKE_SETTINGS:-$CLAUDE_DIR/settings.json}"
+START_DATE_FILE="${FAKE_START_DATE_PATH:-$REPO/eval/state/start-date.txt}"
+CONFIG_FILE="${FAKE_CONFIG:-$REPO/capture.env}"
+GLOBAL_CLAUDE_MD="${FAKE_GLOBAL_CLAUDE_MD:-$CLAUDE_DIR/CLAUDE.md}"
 if [[ "$SMOKE" == "--smoke-test-mode" ]]; then
-    CLAUDE_DIR="${FAKE_HOME:-$HOME}/.claude"
     VAULT="${FAKE_VAULT:-$HOME/Obsidian}"
-    SETTINGS="${FAKE_SETTINGS:-$CLAUDE_DIR/settings.json}"
-    START_DATE_FILE="${FAKE_START_DATE_PATH:-$REPO/eval/state/start-date.txt}"
-    CONFIG_FILE="${FAKE_CONFIG:-$REPO/capture.env}"
-    GLOBAL_CLAUDE_MD="${FAKE_GLOBAL_CLAUDE_MD:-$CLAUDE_DIR/CLAUDE.md}"
 else
-    CLAUDE_DIR="$HOME/.claude"
-    SETTINGS="$CLAUDE_DIR/settings.json"
-    START_DATE_FILE="$REPO/eval/state/start-date.txt"
-    CONFIG_FILE="$REPO/capture.env"
     VAULT="$(resolve_vault)"
 fi
 
@@ -99,17 +99,18 @@ if ! grep -qxF 'state/' "$EVAL_GITIGNORE" 2>/dev/null; then
     echo "Added state/ to eval/.gitignore"
 fi
 
-# ── 4. Register SessionEnd hook in settings.json ─────────────────────────────
+# ── 3. Register SessionEnd hook in settings.json ─────────────────────────────
 echo "Updating $SETTINGS..."
 mkdir -p "$(dirname "$SETTINGS")"
 if [[ ! -f "$SETTINGS" ]]; then
     echo '{"hooks": {"SessionEnd": []}}' > "$SETTINGS"
 fi
 
-# Backup
+# Backup, restored below if the registration itself fails (the only step that
+# can leave the file half-written).
 cp "$SETTINGS" "${SETTINGS}.bak"
 
-python3 - "$SETTINGS" "$HOOK_CMD" <<'PYEOF'
+if ! python3 - "$SETTINGS" "$HOOK_CMD" <<'PYEOF'
 import json, sys
 
 settings_path = sys.argv[1]
@@ -137,65 +138,34 @@ with open(settings_path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PYEOF
-
-# Validate JSON
-if ! python3 -m json.tool "$SETTINGS" >/dev/null 2>&1; then
-    echo "ERROR: settings.json invalid after modification — restoring backup"
+then
+    echo "ERROR: hook registration failed — restoring settings.json backup" >&2
     cp "${SETTINGS}.bak" "$SETTINGS"
     exit 1
 fi
 echo "Hook registered in settings.json"
 
-# ── 5. Placeholder substitution helper ────────────────────────────────────────
-# Substitute the __VAULT_DIR__ / __REPO_DIR__ placeholders that patch files carry
-# with this user's resolved absolute paths. Used by the vault-save skill below.
-# (Inbox-triage skill patches now live in a separate external extension — see the
-# "Consuming captures" section of the README.)
-substitute_paths() {
-    local content="$1"
-    content="${content//__VAULT_DIR__/$VAULT}"
-    content="${content//__REPO_DIR__/$REPO}"
-    printf '%s' "$content"
-}
-
 VAULT_SAVE_PATCH="$REPO/skill-patches/vault-save.md"
 VAULT_SAVE_TRIGGER_PATCH="$REPO/skill-patches/global-claude-md.vault-save-trigger.md"
 
-# ── 5b. Install / update vault-save skill ────────────────────────────────────
-# vault-save is different from daily/weekly: the patch IS the full skill file,
-# not an injection into a foreign SKILL.md. So we write it on first install and
-# do a marker-bounded replace on updates. Either way, placeholders are substituted.
+# ── 4. Install / update vault-save skill ─────────────────────────────────────
+# The patch IS the full skill file, so every run overwrites the whole file. Its
+# YAML frontmatter must stay at byte 0 for Claude Code to parse the skill
+# description — never wrap the file in additional markers. Patch files carry
+# __VAULT_DIR__ / __REPO_DIR__ placeholders resolved to this user's paths.
 if [[ -f "$VAULT_SAVE_PATCH" ]]; then
     VAULT_SAVE_SKILL="$CLAUDE_DIR/skills/vault-save/SKILL.md"
     mkdir -p "$(dirname "$VAULT_SAVE_SKILL")"
-    VAULT_SAVE_BEGIN="<!-- BEGIN claude-vault-capture: vault-save -->"
-    VAULT_SAVE_END="<!-- END claude-vault-capture: vault-save -->"
-    vault_save_content="$(substitute_paths "$(<"$VAULT_SAVE_PATCH")")"
-    if [[ ! -f "$VAULT_SAVE_SKILL" ]]; then
-        printf '%s\n' "$vault_save_content" > "$VAULT_SAVE_SKILL"
-        echo "Created vault-save skill at $VAULT_SAVE_SKILL"
-    elif grep -qF "$VAULT_SAVE_BEGIN" "$VAULT_SAVE_SKILL"; then
-        # Marker-bounded replace (standard update path)
-        python3 - "$VAULT_SAVE_SKILL" "$VAULT_SAVE_BEGIN" "$VAULT_SAVE_END" "$vault_save_content" <<'PYEOF'
-import sys, re
-path, begin, end, content = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-text = open(path).read()
-new_block = f"{begin}\n{content}\n{end}"
-pattern = re.escape(begin) + r".*?" + re.escape(end)
-updated = re.sub(pattern, new_block, text, flags=re.DOTALL)
-open(path, "w").write(updated)
-PYEOF
-        echo "Updated vault-save skill at $VAULT_SAVE_SKILL"
-    else
-        # Old install without markers — overwrite to adopt marker format
-        printf '%s\n' "$vault_save_content" > "$VAULT_SAVE_SKILL"
-        echo "Migrated vault-save skill to marker-bounded format at $VAULT_SAVE_SKILL"
-    fi
+    vault_save_content="$(<"$VAULT_SAVE_PATCH")"
+    vault_save_content="${vault_save_content//__VAULT_DIR__/$VAULT}"
+    vault_save_content="${vault_save_content//__REPO_DIR__/$REPO}"
+    printf '%s\n' "$vault_save_content" > "$VAULT_SAVE_SKILL"
+    echo "Installed vault-save skill at $VAULT_SAVE_SKILL"
 else
     echo "WARNING: $VAULT_SAVE_PATCH not found — skipping vault-save skill creation"
 fi
 
-# ── 5c. Inject vault-save auto-trigger into global ~/.claude/CLAUDE.md ────────
+# ── 5. Inject vault-save auto-trigger into global ~/.claude/CLAUDE.md ─────────
 if [[ -f "$VAULT_SAVE_TRIGGER_PATCH" ]]; then
     touch "$GLOBAL_CLAUDE_MD"
 
@@ -205,28 +175,20 @@ if [[ -f "$VAULT_SAVE_TRIGGER_PATCH" ]]; then
 
     cp "$GLOBAL_CLAUDE_MD" "${GLOBAL_CLAUDE_MD}.bak"
 
-    if grep -qF "$BEGIN_MARKER" "$GLOBAL_CLAUDE_MD"; then
-        # Replace existing marker block
-        python3 - "$GLOBAL_CLAUDE_MD" "$BEGIN_MARKER" "$END_MARKER" "$TRIGGER_CONTENT" <<'PYEOF'
+    # Replace the existing marker block, or append one on first install.
+    python3 - "$GLOBAL_CLAUDE_MD" "$BEGIN_MARKER" "$END_MARKER" "$TRIGGER_CONTENT" <<'PYEOF'
 import sys, re
 path, begin, end, content = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 text = open(path).read()
 new_block = f"{begin}\n{content}\n{end}"
-pattern = re.escape(begin) + r".*?" + re.escape(end)
-updated = re.sub(pattern, new_block, text, flags=re.DOTALL)
+if begin in text:
+    pattern = re.escape(begin) + r".*?" + re.escape(end)
+    updated = re.sub(pattern, new_block, text, flags=re.DOTALL)
+else:
+    separator = "\n" if text.endswith("\n") else "\n\n"
+    updated = text + separator + new_block + "\n"
 open(path, "w").write(updated)
 PYEOF
-    else
-        # First install: append at end with a blank line separator
-        python3 - "$GLOBAL_CLAUDE_MD" "$BEGIN_MARKER" "$END_MARKER" "$TRIGGER_CONTENT" <<'PYEOF'
-import sys
-path, begin, end, content = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-text = open(path).read()
-separator = "\n" if text.endswith("\n") else "\n\n"
-block = f"{separator}{begin}\n{content}\n{end}\n"
-open(path, "w").write(text + block)
-PYEOF
-    fi
     echo "Injected vault-save trigger into $GLOBAL_CLAUDE_MD"
 else
     echo "WARNING: $VAULT_SAVE_TRIGGER_PATCH not found — skipping global CLAUDE.md update"

@@ -7,13 +7,13 @@ documented `timeout` skip reason. _invoke_via_api_key now normalizes it.
 """
 
 import importlib
-import json
 
 import anthropic
 import httpx
 import pytest
 
 import curate
+from conftest import read_log
 
 
 def _timeout_client(*args, **kwargs):
@@ -85,10 +85,6 @@ def test_run_capture_maps_api_timeout_to_skip_reason(monkeypatch, temp_vault):
         index_path=temp_vault.index_path,
     )
 
-    entries = [
-        json.loads(line)
-        for line in temp_vault.log_path.read_text().splitlines()
-        if line.strip()
-    ]
+    entries = read_log(temp_vault.log_path)
     assert len(entries) == 1
     assert entries[0]["skip_reason_a"] == "timeout"

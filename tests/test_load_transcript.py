@@ -1,10 +1,8 @@
 """Tests for _load_transcript and _extract_text — covers list content blocks."""
 
 import json
-import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "hooks"))
 
 from curate import _extract_text, _load_transcript
 
