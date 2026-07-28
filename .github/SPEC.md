@@ -208,7 +208,7 @@ model: <model-id>
     session-end-capture.sh             # entry point, stdin-driven, backgrounds curate.py
     curate.py                          # Anthropic SDK, runs both model calls in parallel
     scrub.py                           # regex-based secret scrubber (§7); pure, stdlib-only
-    scrub_rules.py                     # pattern/sentinel definitions used by scrub.py
+    scrub_rules.py                     # pattern/replacement definitions used by scrub.py
   prompts/
     curation-system-prompt.md          # Path A — strict extraction, may return null
     raw-baseline-prompt.md             # Path B — always summarizes, no judgment
@@ -451,7 +451,7 @@ Transcripts can contain pasted secrets, env vars, tokens, or private keys. `scru
 **Design constraints:**
 - Idempotent: `scrub(scrub(x)) == scrub(x)`. Rules operate only on non-sentinel text.
 - Deterministic: same input → same output. No LLM in the scrubber.
-- Fail-safe to availability: on `re.error` (malformed pattern — narrow catch, not broad `except Exception`), the rule is skipped AND a line is appended to `eval/state/scrub-failures.md` with `YYYY-MM-DD HH:MM:SS\t<rule_name>\t<exception>`. Programming errors in rule logic (e.g. `TypeError`) propagate normally. **Consequence:** if the `private_key` rule fails, a full private key block may be sent to the Anthropic API and written to the vault. This is an acceptable availability tradeoff but **must be visible**:
+- Fail-safe to availability: on an invalid rule — `re.error` from a malformed pattern, or `IndexError`/`KeyError` from an invalid replacement template, caught at compile time via a probe `subn` (narrow catch, not broad `except Exception`) — the rule is skipped AND a line is appended to `eval/state/scrub-failures.md` with `YYYY-MM-DD HH:MM:SS\t<rule_name>\t<exception>`. Programming errors in rule logic (e.g. `TypeError`) propagate normally. **Consequence:** if the `private_key` rule fails, a full private key block may be sent to the Anthropic API and written to the vault. This is an acceptable availability tradeoff but **must be visible**:
   - `hooks.log` records `SCRUB_RULE_FAILED: <rule_name>`.
   - `eval/state/scrub-failures.md` persists the failure across restarts.
   - An Inbox-triage extension (§2.3) reads `scrub-failures.md` and displays `⚠ N scrub rule(s) failed today` at the top of its triage output when entries match the target date. The user acknowledges by manually clearing or archiving the file after reviewing what, if anything, leaked during the failure window. This repo only *writes* the file; surfacing it is the extension's job.

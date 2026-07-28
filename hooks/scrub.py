@@ -13,6 +13,7 @@ Design:
 
 import re
 import os
+import sys
 import datetime
 import pathlib
 
@@ -45,14 +46,24 @@ def _log_failure(rule_name: str, exc: Exception) -> None:
 
 
 def _compile_rules():
-    """Compile all rules; a failed rule is logged and skipped."""
+    """Compile all rules; a failed rule is logged and skipped.
+
+    The probe subn validates the replacement template too: templates are
+    parsed eagerly on every subn call (a bad group reference raises even with
+    zero matches), so an invalid template must fail here — logged and skipped
+    per rule — not abort the whole scrub at redaction time.
+    """
     compiled = []
     for rule in RULES:
         try:
             pat = re.compile(rule["pattern"], re.MULTILINE)
+            pat.subn(rule["replacement"], "")
             compiled.append((rule, pat))
-        except re.error as exc:
+        except (re.error, IndexError, KeyError) as exc:
             _log_failure(rule["name"], exc)
+            # SPEC §7: a scrub-rule failure must also be visible in hooks.log —
+            # session-end-capture.sh redirects this stderr there.
+            print(f"SCRUB_RULE_FAILED: {rule['name']}: {exc}", file=sys.stderr)
     return compiled
 
 

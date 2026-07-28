@@ -46,8 +46,11 @@ resolve_vault() {
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Each FAKE_* fallback exists for the install smoke test (eval/run-install-smoke.sh),
-# which redirects every write into temp dirs. Only VAULT needs gating: in smoke
-# mode resolve_vault's prompt/error path must never run.
+# which redirects every write into temp dirs. FAKE_* is that harness's contract
+# only: outside smoke mode a stray export must never redirect a real install.
+if [[ "$SMOKE" != "--smoke-test-mode" ]]; then
+    unset FAKE_HOME FAKE_VAULT FAKE_SETTINGS FAKE_START_DATE_PATH FAKE_CONFIG FAKE_GLOBAL_CLAUDE_MD
+fi
 CLAUDE_DIR="${FAKE_HOME:-$HOME}/.claude"
 SETTINGS="${FAKE_SETTINGS:-$CLAUDE_DIR/settings.json}"
 START_DATE_FILE="${FAKE_START_DATE_PATH:-$REPO/eval/state/start-date.txt}"

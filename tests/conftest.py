@@ -120,32 +120,43 @@ def temp_vault(tmp_path, monkeypatch):
     them here catches any call site that doesn't thread an explicit path — the
     transcript_missing logging in main() wrote 6 rows into the live W30
     eval/state/log.md exactly that way (session id gone00112233aabb0012).
+
+    The globals are pointed at a default-state subtree DISTINCT from the
+    returned explicit paths: a call site that silently drops an explicit path
+    writes where no test assertion will accidentally find it, so the drop
+    fails loudly instead of passing by coincidence. run_main re-points the
+    globals at the explicit paths, because main() threads no path arguments
+    and legitimately resolves the defaults.
+
     Returns .vault_dir/.log_path/.index_path for tests that assert on state.
     """
     import curate
 
     vault_dir = tmp_path / "vault"
     (vault_dir / "Inbox" / "auto").mkdir(parents=True)
-    paths = SimpleNamespace(
+    default_state = tmp_path / "default-state"
+    monkeypatch.setattr(curate, "LOG_PATH", default_state / "log.md")
+    monkeypatch.setattr(curate, "INDEX_PATH", default_state / "session-index.tsv")
+    monkeypatch.setattr(curate, "VAULT_DIR", default_state / "vault")
+    return SimpleNamespace(
         vault_dir=vault_dir,
         log_path=tmp_path / "log.md",
         index_path=tmp_path / "session-index.tsv",
     )
-    monkeypatch.setattr(curate, "LOG_PATH", paths.log_path)
-    monkeypatch.setattr(curate, "INDEX_PATH", paths.index_path)
-    monkeypatch.setattr(curate, "VAULT_DIR", paths.vault_dir)
-    return paths
 
 
 @pytest.fixture
 def run_main(monkeypatch, temp_vault):
     """Invoke curate.main() against the temp vault, returning the parsed log entries.
 
-    The autouse temp_vault fixture already points curate's module globals at
-    the temp paths; path defaults resolve at call time, so main() needs no
-    argument threading.
+    main() threads no path arguments — every write resolves the module
+    globals — so point them at the temp_vault paths the tests assert on.
     """
     import curate
+
+    monkeypatch.setattr(curate, "LOG_PATH", temp_vault.log_path)
+    monkeypatch.setattr(curate, "INDEX_PATH", temp_vault.index_path)
+    monkeypatch.setattr(curate, "VAULT_DIR", temp_vault.vault_dir)
 
     def _run(transcript_path, session_id, cwd):
         monkeypatch.setattr(

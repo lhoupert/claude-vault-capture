@@ -40,6 +40,13 @@ class TestProjectDerivation:
 
 
 class TestTokenCeiling:
+    @pytest.fixture(autouse=True)
+    def _clear_env_override(self, monkeypatch):
+        """These tests size inputs from the imported literal default; an
+        exported CAPTURE_MAX_EST_TOKENS (e.g. sourced from capture.env) would
+        change the call-time limit out from under them."""
+        monkeypatch.delenv("CAPTURE_MAX_EST_TOKENS", raising=False)
+
     def test_above_limit_returns_true(self):
         # Need +4 chars (+1 token) because // 4 truncates: 200001 // 4 = 50000 (not above)
         text = "a" * (CAPTURE_MAX_EST_TOKENS * 4 + 4)
