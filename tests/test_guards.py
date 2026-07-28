@@ -4,12 +4,26 @@ import sys
 import pathlib
 import subprocess
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "hooks"))
 
 from curate import derive_project, is_above_token_limit, CAPTURE_MAX_EST_TOKENS
 
 
 class TestProjectDerivation:
+    @pytest.fixture(autouse=True)
+    def _scrub_git_env(self, monkeypatch):
+        """Drop git's exported repo env so subprocess git calls see only cwd.
+
+        When pytest itself runs inside a git hook (the pre-push hook does
+        this), git exports GIT_DIR et al.; derive_project's `git rev-parse`
+        then resolves against the exporting repo instead of the tmp_path repo
+        these tests create, e.g. reporting `subdir` as the toplevel.
+        """
+        for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+            monkeypatch.delenv(var, raising=False)
+
     def test_inside_git_repo_returns_basename(self, tmp_path):
         repo = tmp_path / "my-project"
         repo.mkdir()
