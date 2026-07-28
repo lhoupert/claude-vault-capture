@@ -195,9 +195,11 @@ def render_frontmatter(
 def is_duplicate_session(
     session_id: str,
     *,
-    index_path: pathlib.Path = INDEX_PATH,
+    index_path: pathlib.Path | None = None,
 ) -> bool:
     """Return True if session_id already appears in the index TSV."""
+    if index_path is None:
+        index_path = INDEX_PATH
     if not index_path.exists():
         return False
     with open(index_path, encoding="utf-8") as fh:
@@ -303,8 +305,16 @@ def build_log_entry(
 # ── concurrent-safe append ────────────────────────────────────────────────────
 
 
-def append_log(entry: dict, *, log_path: pathlib.Path = LOG_PATH) -> None:
-    """Append one JSON line to log_path with cross-process flock + in-process lock."""
+def append_log(entry: dict, *, log_path: pathlib.Path | None = None) -> None:
+    """Append one JSON line to log_path with cross-process flock + in-process lock.
+
+    log_path resolves to the module-level LOG_PATH at call time (not frozen as a
+    default arg) so tests that monkeypatch curate.LOG_PATH are honored even for
+    call sites that don't thread an explicit path — main()'s transcript_missing
+    logging wrote 6 test rows into the live W30 log via the frozen default.
+    """
+    if log_path is None:
+        log_path = LOG_PATH
     line = json.dumps(entry) + "\n"
     with _STATE_LOCK:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,9 +330,11 @@ def _append_index(
     path_a: str | None,
     date_str: str,
     *,
-    index_path: pathlib.Path = INDEX_PATH,
+    index_path: pathlib.Path | None = None,
 ) -> None:
     """Append one line to session-index.tsv, creating the file with header if absent."""
+    if index_path is None:
+        index_path = INDEX_PATH
     index_path.parent.mkdir(parents=True, exist_ok=True)
     with _STATE_LOCK:
         with open(index_path, "a", encoding="utf-8") as fh:
@@ -406,9 +418,15 @@ def _invoke_via_subscription(
 
     Auth comes from CLAUDE_CODE_OAUTH_TOKEN (see `claude setup-token`). The
     runtime controls output length, so max_tokens has no equivalent here — our
-    prompts already constrain the response to compact JSON. Runs single-shot
-    (max_turns=1) with no tools, so this stays a pure text→text call. The user
-    text is prefixed with _SUBSCRIPTION_DIRECTIVE to suppress agentic behavior.
+    prompts already constrain the response to compact JSON. No tools are
+    allowed, so this stays a pure text→text call; the user text is prefixed
+    with _SUBSCRIPTION_DIRECTIVE to suppress agentic behavior. max_turns is a
+    safety valve, not a single-shot constraint: at max_turns=1 the CLI ends the
+    run with error_max_turns whenever the agent burns its only turn on anything
+    but the final reply (e.g. an attempted tool call), discarding paid output —
+    3 of W30's 4 error:Exception losses. A reply that already streamed before
+    an error result is kept (see the salvage below); downstream JSON parsing
+    decides whether it's usable.
     """
     import asyncio
     from claude_agent_sdk import (
@@ -425,29 +443,38 @@ def _invoke_via_subscription(
         options = ClaudeAgentOptions(
             system_prompt=system_prompt,
             model=model,
-            max_turns=1,
+            max_turns=4,
             allowed_tools=[],
         )
         parts: list[str] = []
         tokens_in = tokens_out = 0
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        parts.append(block.text)
-            elif isinstance(message, ResultMessage):
-                usage = message.usage or {}
-                # The runtime serves most input from cache (its own ~22k-token harness
-                # system prompt dominates), so input_tokens alone is misleadingly tiny.
-                # Sum all three to reflect what the model actually processed. Note this
-                # makes subscription cost estimates non-comparable to API mode: they
-                # include Claude Code's harness overhead the subscription absorbs.
-                tokens_in = (
-                    (usage.get("input_tokens", 0) or 0)
-                    + (usage.get("cache_creation_input_tokens", 0) or 0)
-                    + (usage.get("cache_read_input_tokens", 0) or 0)
-                )
-                tokens_out = usage.get("output_tokens", 0) or 0
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            parts.append(block.text)
+                elif isinstance(message, ResultMessage):
+                    usage = message.usage or {}
+                    # The runtime serves most input from cache (its own ~22k-token harness
+                    # system prompt dominates), so input_tokens alone is misleadingly tiny.
+                    # Sum all three to reflect what the model actually processed. Note this
+                    # makes subscription cost estimates non-comparable to API mode: they
+                    # include Claude Code's harness overhead the subscription absorbs.
+                    tokens_in = (
+                        (usage.get("input_tokens", 0) or 0)
+                        + (usage.get("cache_creation_input_tokens", 0) or 0)
+                        + (usage.get("cache_read_input_tokens", 0) or 0)
+                    )
+                    tokens_out = usage.get("output_tokens", 0) or 0
+        except Exception as exc:
+            # The CLI exits non-zero after an error result (error_max_turns, or
+            # even subtype "success" — both seen in W30) and the SDK surfaces
+            # that as an exception mid-iteration, after the reply text already
+            # streamed. Discarding it loses a paid, often-complete response.
+            if not parts:
+                raise
+            _log_error(f"SUBSCRIPTION_SALVAGE partial reply kept after: {exc}")
         return "".join(parts).strip(), tokens_in, tokens_out
 
     # asyncio.TimeoutError is TimeoutError on 3.11+, so the existing
@@ -669,16 +696,20 @@ def run_capture(
     transcript: list[dict],
     session_id: str,
     cwd: str,
-    vault_dir: str | pathlib.Path = VAULT_DIR,
-    log_path: pathlib.Path = LOG_PATH,
-    index_path: pathlib.Path = INDEX_PATH,
+    vault_dir: str | pathlib.Path | None = None,
+    log_path: pathlib.Path | None = None,
+    index_path: pathlib.Path | None = None,
     date_str: str | None = None,
     prompts_dir: pathlib.Path | None = None,
 ) -> None:
     """Full capture pipeline: scrub → threshold → dedup → API calls → write → log."""
     import scrub as scrub_mod
 
-    vault_dir = pathlib.Path(vault_dir)
+    vault_dir = pathlib.Path(vault_dir if vault_dir is not None else VAULT_DIR)
+    if log_path is None:
+        log_path = LOG_PATH
+    if index_path is None:
+        index_path = INDEX_PATH
     if prompts_dir is None:
         prompts_dir = pathlib.Path(__file__).parent.parent / "prompts"
     if date_str is None:

@@ -47,6 +47,24 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_eval_state(monkeypatch, tmp_path_factory):
+    """Point curate's module-level state paths at a temp dir for every test.
+
+    Path defaults in curate.py resolve these globals at call time, so this
+    guard catches any call site that doesn't thread an explicit path — the
+    transcript_missing logging in main() wrote 6 rows into the live W30
+    eval/state/log.md exactly that way (session id gone00112233aabb0012).
+    """
+    import curate
+
+    state = tmp_path_factory.mktemp("eval-state-guard")
+    monkeypatch.setattr(curate, "LOG_PATH", state / "log.md")
+    monkeypatch.setattr(curate, "INDEX_PATH", state / "session-index.tsv")
+    monkeypatch.setattr(curate, "VAULT_DIR", state / "vault")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_scrub_failures_path():
     """Re-establish the temp failures path before each test.
 
@@ -141,6 +159,12 @@ def run_main(monkeypatch, temp_vault):
         return real_run_capture(**kwargs)
 
     monkeypatch.setattr(curate, "run_capture", _wrapped)
+    # main() logs transcript_missing directly (not via run_capture); point the
+    # module globals at the same temp paths so those entries land in
+    # temp_vault.log_path and are visible to the test's log assertions.
+    monkeypatch.setattr(curate, "LOG_PATH", temp_vault.log_path)
+    monkeypatch.setattr(curate, "INDEX_PATH", temp_vault.index_path)
+    monkeypatch.setattr(curate, "VAULT_DIR", temp_vault.vault_dir)
 
     def _run(transcript_path, session_id, cwd):
         monkeypatch.setattr(
