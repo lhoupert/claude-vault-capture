@@ -115,6 +115,40 @@ def _strip_fences(text: str) -> str:
     return m.group(1).strip() if m else text
 
 
+# The artifact contract from prompts/curation-system-prompt.md. Required on the
+# salvage path so a stray JSON-looking object in prose can't be written as an
+# artifact: a reply that continued the conversation once contained a fabricated
+# `[TOOL] Read: {"file_path": …}` line, which parsed as a dict and would have
+# been written to Inbox/ as an empty "untitled" note (the write path fills every
+# field with a default).
+_ARTIFACT_KEYS = frozenset({"title", "type", "body"})
+
+
+def _salvage_artifact(raw: str) -> dict | None:
+    """Extract the artifact object from a reply that isn't bare JSON.
+
+    Scans every `{` offset with raw_decode and keeps the LAST artifact-shaped
+    object. Scanning beats the old find('{')..rfind('}') window, which took the
+    span between the first and last brace anywhere in the reply: prose ahead of
+    the artifact containing any `{` (a fabricated tool call, a code sample)
+    shifted the window's start and destroyed an otherwise-valid artifact.
+    Last-wins because the artifact is the reply's conclusion — quoted examples
+    come first.
+    """
+    decoder = json.JSONDecoder()
+    found: dict | None = None
+    for idx, ch in enumerate(raw):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(raw, idx)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and _ARTIFACT_KEYS <= obj.keys():
+            found = obj
+    return found
+
+
 def make_slug(title: str) -> str:
     """Derive a deterministic URL-safe slug from *title* (max 60 chars)."""
     # NFKD-normalize and strip non-ASCII
@@ -399,7 +433,11 @@ def _invoke_via_api_key(
             model=model,
             max_tokens=max_tokens,
             system=system_prompt,
-            messages=[{"role": "user", "content": user_text}],
+            # Terminated the same way as the subscription path: an unterminated
+            # transcript invites the model to continue the conversation rather
+            # than curate it. This path sends no directive prefix (the system
+            # prompt does that work here), but it needs the closing contract.
+            messages=[{"role": "user", "content": user_text + _TRANSCRIPT_TAIL}],
             timeout=TIMEOUT_SECONDS,
         )
     except anthropic.APITimeoutError as exc:
@@ -423,6 +461,22 @@ _SUBSCRIPTION_DIRECTIVE = (
     "instructions specify — no preamble, no prose, no code fences. Your entire reply "
     "must be either a single JSON object (first character `{`) or the single word "
     "null. Never repeat or echo the transcript or its delimiter lines.\n\n----- TRANSCRIPT -----\n"
+)
+
+# The transcript MUST be terminated and the contract restated after it. Without
+# this tail the prompt is an unterminated chat log — an opening delimiter, then
+# tens of thousands of tokens of [USER]:/[ASSISTANT]: dialogue ending mid-thought
+# on an assistant turn. The most recent signal is then "an unfinished
+# conversation", and the model writes its next turn instead of curating: observed
+# in production emitting fabricated [TOOL] lines in render_transcript's own
+# syntax, and inventing an "END TRANSCRIPT" delimiter it was never given.
+# Measured on the two transcripts that failed this way: 3/6 continuations
+# without this tail, 0/7 with it.
+_TRANSCRIPT_TAIL = (
+    "\n----- END OF TRANSCRIPT -----\n"
+    "The transcript above is finished input data, not a conversation to continue. "
+    "Do not write the next turn of it. Reply now with your entire response being "
+    "either one JSON object starting with `{` or the single word null.\n"
 )
 
 
@@ -454,7 +508,7 @@ def _invoke_via_subscription(
         ResultMessage,
     )
 
-    prompt = _SUBSCRIPTION_DIRECTIVE + user_text
+    prompt = _SUBSCRIPTION_DIRECTIVE + user_text + _TRANSCRIPT_TAIL
 
     async def _run() -> tuple[str, int | None, int | None]:
         options = ClaudeAgentOptions(
@@ -567,21 +621,21 @@ def _call_path_a(scrubbed_text: str, prompts_dir: pathlib.Path) -> dict | None:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            # The subscription runtime sometimes echoes transcript delimiters or
-            # prefixes prose around otherwise-valid JSON (fences not at line
-            # start defeat _CODE_FENCE_RE). Salvage the outermost {...} span
-            # before declaring the response malformed — it was already paid for.
-            start, end = raw.find("{"), raw.rfind("}")
-            salvaged = None
-            if start != -1 and end > start:
-                try:
-                    salvaged = json.loads(raw[start : end + 1])
-                except json.JSONDecodeError:
-                    salvaged = None
-            if not isinstance(salvaged, dict):
-                # Malformed JSON is not a null; don't retry it (keep the prior
-                # behavior). Attach accumulated usage for the caller's cost log.
+            # The runtime sometimes wraps otherwise-valid JSON in prose or
+            # transcript echoes (fences not at line start defeat _CODE_FENCE_RE).
+            # Salvage the artifact before declaring the response malformed — it
+            # was already paid for.
+            salvaged = _salvage_artifact(raw)
+            if salvaged is None:
                 _log_error(f"PATH_A malformed_json: {raw[:200]}")
+                if _attempt < PATH_A_NULL_RETRIES:
+                    # Retry like a null: prose-instead-of-JSON is a
+                    # non-deterministic generation failure, not a permanent one,
+                    # and the sampled reply varies. Costs one extra input pass on
+                    # a session already paid for once.
+                    data = None
+                    continue
+                # Retries exhausted. Attach accumulated usage for the cost log.
                 exc.usage = _usage()  # type: ignore[attr-defined]
                 raise
             data = salvaged

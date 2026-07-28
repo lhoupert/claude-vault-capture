@@ -54,6 +54,8 @@ session-end-capture.sh  →  curate.py (backgrounded, nohup)
 - **Scrub runs twice.** On the transcript before any API call; on each model output before writing to disk.
 - **Title is always sanitized** before it appears in a filename, frontmatter, or wikilink.
 - **Fence-stripping before JSON parsing.** Models sometimes wrap JSON in ` ```json…``` ` despite prompt instructions. `_strip_fences()` is applied to every model response before `json.loads()`.
+- **The transcript is always terminated.** Both transports append `_TRANSCRIPT_TAIL` after the rendered transcript, closing the delimiter and restating the JSON-or-null contract. Without it the prompt is an unfinished chat log and the model writes the conversation's next turn instead of curating — the cause of every `malformed_json` in the archive. Never send transcript text as the last thing in a prompt.
+- **Salvage requires artifact shape.** `_salvage_artifact()` only accepts an object carrying `title`/`type`/`body`. The write path defaults every missing field, so an unshaped dict (e.g. a fabricated `{"file_path": …}`) would otherwise be written to `Inbox/` as an empty "untitled" note.
 - **No writes outside `Inbox/`.** Promotions to structured vault folders happen only via explicit user approval in skill patches.
 - **`eval/state/` is gitignored.** Runtime state is never committed.
 
@@ -66,7 +68,7 @@ session-end-capture.sh  →  curate.py (backgrounded, nohup)
 | `token_limit` | `len(scrubbed_text) // 4 > CAPTURE_MAX_EST_TOKENS` (default 50 000) |
 | `duplicate` | session_id already present in session-index.tsv |
 | `model_returned_null` | Sonnet returned the literal string `null` on both the initial call and the one retry |
-| `malformed_json` | model response isn't valid JSON even after fence-stripping (not retried) |
+| `malformed_json` | model response isn't valid JSON after fence-stripping and artifact salvage, on both the initial call and the one retry |
 | `timeout` | a model call exceeded `CAPTURE_TIMEOUT_SECONDS` (default 30 s) |
 | `error:<ExcType>` | any other exception |
 

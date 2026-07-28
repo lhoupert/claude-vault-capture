@@ -55,7 +55,8 @@ def test_pure_prose_still_malformed(monkeypatch):
     with pytest.raises(json.JSONDecodeError) as exc:
         curate._call_path_a("scrubbed", PROMPTS)
 
-    assert exc.value.usage["tokens_in"] == 100  # cost still logged on failure
+    # 2 x 100: unsalvageable output is retried once before giving up.
+    assert exc.value.usage["tokens_in"] == 200  # cost still logged on failure
 
 
 def test_prose_with_stray_braces_still_malformed(monkeypatch):
@@ -93,3 +94,74 @@ def test_subscription_directive_pins_output_contract():
     assert "null" in d.lower()
     assert "{" in d
     assert "echo" in d.lower() or "repeat" in d.lower()
+
+
+class TestProductionFailureShapes:
+    """Regression tests built from the two replies that failed in production on
+    2026-07-28 (sessions e4cf3de6…, eddf176a…). Both were the model continuing
+    the captured conversation instead of curating it — see _TRANSCRIPT_TAIL.
+    """
+
+    def test_artifact_after_fabricated_tool_call_is_recovered(self, monkeypatch):
+        """The reply opened with a fabricated `[TOOL] Read: {...}` line and
+        ended with a complete artifact. The old find('{')..rfind('}') window
+        started inside the tool-call brace and destroyed a valid, paid-for
+        artifact; the raw_decode scan recovers it."""
+        artifact = {"title": "Recovered", "type": "runbook", "body": "steps"}
+        text = (
+            "[ASSISTANT]: \n"
+            "[ASSISTANT]: I notice the session ended without my confirming it landed. "
+            "Let me verify:\n"
+            '[ASSISTANT]: [TOOL] Read: {"file_path": "/Users/x/.claude/projects", '
+            '"limit": 10}\n'
+            "[USER]: [OUT] ok\n\n" + json.dumps(artifact)
+        )
+        monkeypatch.setattr(curate, "_invoke_model", _single(text))
+
+        result = curate._call_path_a("scrubbed", PROMPTS)
+
+        assert result["title"] == "Recovered"
+        assert result["type"] == "runbook"
+
+    def test_fabricated_tool_call_alone_is_not_written_as_an_artifact(
+        self, monkeypatch
+    ):
+        """A JSON-shaped object that isn't an artifact must NOT be salvaged: the
+        write path defaults every missing field, so this used to land in Inbox/
+        as an empty 'untitled' note."""
+        text = '[ASSISTANT]: [TOOL] Read: {"file_path": "/x", "limit": 10}'
+        monkeypatch.setattr(curate, "_invoke_model", _single(text))
+
+        with pytest.raises(json.JSONDecodeError):
+            curate._call_path_a("scrubbed", PROMPTS)
+
+    def test_continuation_prose_with_invalid_json_still_raises(self, monkeypatch):
+        """Failure 2's shape: next-turn prose, an invented END TRANSCRIPT
+        delimiter, then JSON whose body contains unescaped quotes. Genuinely
+        unparseable — it must fail rather than be silently repaired."""
+        text = (
+            "**Loïc, you're done for today.** The session log is safe.\n\n"
+            "----- END TRANSCRIPT -----\n\n"
+            '{"title": "T", "type": "gotcha", '
+            '"body": "counted "54 attempts against a budget of 8" — decomposed"}'
+        )
+        monkeypatch.setattr(curate, "_invoke_model", _single(text))
+
+        with pytest.raises(json.JSONDecodeError):
+            curate._call_path_a("scrubbed", PROMPTS)
+
+    def test_transcript_tail_terminates_and_restates_the_contract(self):
+        """The tail is the root-cause fix: without a closing delimiter and a
+        trailing instruction, the prompt reads as an unfinished conversation."""
+        tail = curate._TRANSCRIPT_TAIL
+        assert "END OF TRANSCRIPT" in tail
+        assert "not a conversation to continue" in tail
+        assert "null" in tail and "{" in tail
+
+    def test_both_transports_terminate_the_transcript(self):
+        """Layer 4: the API-key path had the same unterminated-transcript gap,
+        masked only because subscription mode is what runs in production."""
+        import inspect
+
+        for fn in (curate._invoke_via_subscription, curate._invoke_via_api_key):
+            assert "_TRANSCRIPT_TAIL" in inspect.getsource(fn), fn.__name__
