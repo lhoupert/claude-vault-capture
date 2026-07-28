@@ -1,10 +1,7 @@
 """Unit tests for hooks/scrub.py — scrubber rules + idempotency + MULTILINE + malformed-rule skip."""
 
-import sys
 import os
 import pathlib
-
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "hooks"))
 
 
 # ─────────────────────────── helpers ──────────────────────────────────────────

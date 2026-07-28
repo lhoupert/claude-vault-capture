@@ -46,22 +46,12 @@ def pytest_configure(config):
     )
 
 
-@pytest.fixture(autouse=True)
-def _isolate_eval_state(monkeypatch, tmp_path_factory):
-    """Point curate's module-level state paths at a temp dir for every test.
-
-    Path defaults in curate.py resolve these globals at call time, so this
-    guard catches any call site that doesn't thread an explicit path — the
-    transcript_missing logging in main() wrote 6 rows into the live W30
-    eval/state/log.md exactly that way (session id gone00112233aabb0012).
-    """
-    import curate
-
-    state = tmp_path_factory.mktemp("eval-state-guard")
-    monkeypatch.setattr(curate, "LOG_PATH", state / "log.md")
-    monkeypatch.setattr(curate, "INDEX_PATH", state / "session-index.tsv")
-    monkeypatch.setattr(curate, "VAULT_DIR", state / "vault")
-    yield
+def read_log(path) -> list[dict]:
+    """Parse a JSON-lines log file into entry dicts; [] when the file is missing."""
+    path = pathlib.Path(path)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 @pytest.fixture(autouse=True)
@@ -122,47 +112,46 @@ def mock_from_responses(monkeypatch):
     return _install
 
 
-@pytest.fixture
-def temp_vault(tmp_path):
-    """Create an isolated vault layout under tmp_path; return its paths.
+@pytest.fixture(autouse=True)
+def temp_vault(tmp_path, monkeypatch):
+    """Isolated vault layout + curate state paths for every test.
 
-    Returns an object with .vault_dir, .log_path, .index_path attributes.
+    Path defaults in curate.py resolve module globals at call time, so patching
+    them here catches any call site that doesn't thread an explicit path — the
+    transcript_missing logging in main() wrote 6 rows into the live W30
+    eval/state/log.md exactly that way (session id gone00112233aabb0012).
+    Returns .vault_dir/.log_path/.index_path for tests that assert on state.
     """
+    import curate
+
     vault_dir = tmp_path / "vault"
     (vault_dir / "Inbox" / "auto").mkdir(parents=True)
-
-    return SimpleNamespace(
+    paths = SimpleNamespace(
         vault_dir=vault_dir,
         log_path=tmp_path / "log.md",
         index_path=tmp_path / "session-index.tsv",
     )
+    monkeypatch.setattr(curate, "LOG_PATH", paths.log_path)
+    monkeypatch.setattr(curate, "INDEX_PATH", paths.index_path)
+    monkeypatch.setattr(curate, "VAULT_DIR", paths.vault_dir)
+    return paths
 
 
 @pytest.fixture
 def run_main(monkeypatch, temp_vault):
     """Invoke curate.main() against the temp vault, returning the parsed log entries.
 
-    curate resolves VAULT_DIR/LOG_PATH/INDEX_PATH at call time, so pointing the
-    module globals at temp_vault covers every path main() can take: run_capture's
-    defaults and the direct transcript_missing append_log alike.
+    The autouse temp_vault fixture already points curate's module globals at
+    the temp paths; path defaults resolve at call time, so main() needs no
+    argument threading.
     """
     import curate
-
-    monkeypatch.setattr(curate, "LOG_PATH", temp_vault.log_path)
-    monkeypatch.setattr(curate, "INDEX_PATH", temp_vault.index_path)
-    monkeypatch.setattr(curate, "VAULT_DIR", temp_vault.vault_dir)
 
     def _run(transcript_path, session_id, cwd):
         monkeypatch.setattr(
             sys, "argv", ["curate.py", str(transcript_path), session_id, cwd]
         )
         curate.main()
-        if not temp_vault.log_path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in temp_vault.log_path.read_text().splitlines()
-            if line.strip()
-        ]
+        return read_log(temp_vault.log_path)
 
     return _run

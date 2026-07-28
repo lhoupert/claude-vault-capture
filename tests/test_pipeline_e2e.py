@@ -14,7 +14,7 @@ import re
 
 import pytest
 
-from conftest import parse_frontmatter
+from conftest import parse_frontmatter, read_log
 
 TRANSCRIPTS = pathlib.Path(__file__).parent.parent / "eval" / "fixtures" / "transcripts"
 
@@ -248,11 +248,7 @@ class TestCredentialGuards:
         # The miss must be logged (to the temp log, never the real one): these
         # sessions were invisible to the weekly no-capture alarm before
         # skip_reason transcript_missing existed.
-        entries = [
-            json.loads(line)
-            for line in temp_vault.log_path.read_text().splitlines()
-            if line.strip()
-        ]
+        entries = read_log(temp_vault.log_path)
         assert len(entries) == 1
         assert entries[0]["skip_reason_a"] == "transcript_missing"
         assert entries[0]["path_a"] is None

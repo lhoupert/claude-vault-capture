@@ -45,7 +45,7 @@ def _log_failure(rule_name: str, exc: Exception) -> None:
 
 
 def _compile_rules():
-    """Compile all rules; return (compiled_list, failed_names)."""
+    """Compile all rules; a failed rule is logged and skipped."""
     compiled = []
     for rule in RULES:
         try:
@@ -53,8 +53,6 @@ def _compile_rules():
             compiled.append((rule, pat))
         except re.error as exc:
             _log_failure(rule["name"], exc)
-            # write to hooks.log as well (best-effort)
-            _log_failure("SCRUB_RULE_FAILED:" + rule["name"], exc)
     return compiled
 
 
@@ -66,33 +64,7 @@ def scrub(text: str) -> tuple[str, dict[str, int]]:
     """Apply all rules to *text* and return (redacted, counts_by_rule)."""
     counts: dict[str, int] = {rule["name"]: 0 for rule in RULES}
     result = text
-
     for rule, pat in _COMPILED:
-        name = rule["name"]
-        sentinel = rule["sentinel"]
-
-        if rule.get("replace_value_only"):
-            # env_var: keep group 'k', replace group 'v' with sentinel
-            def _replace_env(m: re.Match) -> str:
-                counts[name] += 1
-                return m.group(0).replace(m.group("v"), sentinel)
-
-            result = pat.sub(_replace_env, result)
-
-        elif rule.get("replace_group"):
-            # basic_auth_url: group(1) + sentinel + group(2)
-            def _replace_url(m: re.Match, _s=sentinel, _n=name) -> str:
-                counts[_n] += 1
-                return m.group(1) + _s + m.group(2)
-
-            result = pat.sub(_replace_url, result)
-
-        else:
-
-            def _replace_simple(m: re.Match, _s=sentinel, _n=name) -> str:
-                counts[_n] += 1
-                return _s
-
-            result = pat.sub(_replace_simple, result)
-
+        result, n = pat.subn(rule["replacement"], result)
+        counts[rule["name"]] += n
     return result, counts

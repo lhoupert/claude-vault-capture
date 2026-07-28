@@ -24,7 +24,9 @@ import subprocess
 
 # ── constants ──────────────────────────────────────────────────────────────────
 
-CAPTURE_MAX_EST_TOKENS: int = int(os.environ.get("CAPTURE_MAX_EST_TOKENS", "50000"))
+# Default token ceiling; the env var of the same name overrides it at call time
+# (see is_above_token_limit), so this constant is the single home of the literal.
+CAPTURE_MAX_EST_TOKENS: int = 50000
 
 # Slash commands whose sessions are NOT captured. Empty by default — the public
 # pipeline archives everything. An external extension sets CAPTURE_EXCLUDED_COMMANDS
@@ -50,10 +52,6 @@ VAULT_DIR = pathlib.Path(
 LOG_PATH = STATE_DIR / "log.md"
 INDEX_PATH = STATE_DIR / "session-index.tsv"
 HOOKS_LOG = pathlib.Path.home() / ".claude" / "hooks.log"
-
-MOCK_RESPONSES_PATH = (
-    pathlib.Path(__file__).parent.parent / "eval" / "fixtures" / "mock-responses.json"
-)
 
 MODEL_A = "claude-sonnet-4-6"
 MAX_TOKENS_A = 2000
@@ -91,14 +89,11 @@ _MULTI_SPACE_RE = re.compile(r"\s+")
 
 def sanitize_title(title: str) -> str:
     """Strip chars unsafe in Obsidian wikilinks; collapse whitespace; truncate to 120."""
-    s = _BAD_CHARS_RE.sub(" ", title)
-    s = _MULTI_SPACE_RE.sub(" ", s)
-    s = s.strip()
-    return s[:120]
+    return sanitize_summary(title, max_len=120)
 
 
 def sanitize_summary(s: str, max_len: int = 140) -> str:
-    """Same rules as sanitize_title but with a 140-char cap by default."""
+    """Strip chars unsafe in Obsidian wikilinks; collapse whitespace; truncate."""
     s = _BAD_CHARS_RE.sub(" ", s)
     s = _MULTI_SPACE_RE.sub(" ", s)
     s = s.strip()
@@ -224,13 +219,15 @@ def is_below_threshold(messages: list[dict]) -> bool:
 
 def uses_excluded_command(
     messages: list[dict],
-    excluded_commands: list[str] = EXCLUDED_COMMANDS,
+    excluded_commands: list[str] | None = None,
 ) -> bool:
     """Return True if any user turn invokes an excluded slash command.
 
     Matches only when the command appears at the start of a line (possibly
     preceded by whitespace), so mentions of the command in prose are ignored.
     """
+    if excluded_commands is None:
+        excluded_commands = EXCLUDED_COMMANDS
     patterns = [
         re.compile(r"(?m)^\s*" + re.escape(cmd) + r"(?:\s|$)")
         for cmd in excluded_commands
@@ -249,7 +246,7 @@ def uses_excluded_command(
 
 def is_above_token_limit(text: str) -> bool:
     """True if estimated token count exceeds CAPTURE_MAX_EST_TOKENS."""
-    limit = int(os.environ.get("CAPTURE_MAX_EST_TOKENS", "50000"))
+    limit = int(os.environ.get("CAPTURE_MAX_EST_TOKENS", str(CAPTURE_MAX_EST_TOKENS)))
     return len(text) // 4 > limit
 
 
@@ -278,12 +275,12 @@ def derive_project(cwd: str) -> str:
 def build_log_entry(
     *,
     session_id: str,
-    path_a: str | None,
     skip_reason_a: str | None,
-    tokens_in_a: int | None,
-    tokens_out_a: int | None,
-    cost_usd_a: float | None,
     redactions: dict[str, int],
+    path_a: str | None = None,
+    tokens_in_a: int | None = None,
+    tokens_out_a: int | None = None,
+    cost_usd_a: float | None = None,
 ) -> dict:
     now = datetime.datetime.now(datetime.timezone.utc)
     return {
@@ -323,6 +320,23 @@ def append_log(entry: dict, *, log_path: pathlib.Path | None = None) -> None:
             fh.write(line)
             fh.flush()
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _log_skip(
+    session_id: str,
+    reason: str,
+    redactions: dict[str, int],
+    *,
+    log_path: pathlib.Path | None = None,
+) -> None:
+    """Log a no-capture outcome. Every skip must reach log.md — unlogged skips
+    are invisible to the weekly no-capture alarm."""
+    append_log(
+        build_log_entry(
+            session_id=session_id, skip_reason_a=reason, redactions=redactions
+        ),
+        log_path=log_path,
+    )
 
 
 def _append_index(
@@ -505,7 +519,13 @@ def _invoke_via_subscription(
 
 
 def _call_path_a(scrubbed_text: str, prompts_dir: pathlib.Path) -> dict | None:
-    """Call claude-sonnet-4-6 with curation prompt. Returns artifact dict or None."""
+    """Call claude-sonnet-4-6 with the curation prompt.
+
+    Returns the artifact dict with usage keys (tokens_in/tokens_out/cost_usd)
+    merged in. A model null does NOT return None: it returns the usage dict
+    plus {"_null": True} so the spend still reaches the log. (Test doubles may
+    return bare None; run_capture accepts both null spellings.)
+    """
     if os.environ.get("CAPTURE_MOCK_SDK") == "1":
         raise RuntimeError(
             "CAPTURE_MOCK_SDK=1 but no mock injected — call monkeypatched version"
@@ -744,7 +764,7 @@ def run_capture(
     if index_path is None:
         index_path = INDEX_PATH
     if prompts_dir is None:
-        prompts_dir = pathlib.Path(__file__).parent.parent / "prompts"
+        prompts_dir = REPO_ROOT / "prompts"
     if date_str is None:
         date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
@@ -755,62 +775,19 @@ def run_capture(
     raw_text = render_transcript(transcript)
     scrubbed_text, redactions = scrub_mod.scrub(raw_text)
 
-    # ── 2. excluded command check ─────────────────────────────────────────────
-    # Pass the module-level list explicitly (resolved at call time, not frozen as a
-    # default arg) so it reflects CAPTURE_EXCLUDED_COMMANDS and stays test-patchable.
-    if uses_excluded_command(transcript, EXCLUDED_COMMANDS):
-        entry = build_log_entry(
-            session_id=session_id,
-            path_a=None,
-            skip_reason_a="excluded_command",
-            tokens_in_a=None,
-            tokens_out_a=None,
-            cost_usd_a=None,
-            redactions=redactions,
-        )
-        append_log(entry, log_path=log_path)
-        return
-
-    # ── 3. threshold check ────────────────────────────────────────────────────
-    if is_below_threshold(transcript):
-        entry = build_log_entry(
-            session_id=session_id,
-            path_a=None,
-            skip_reason_a="threshold",
-            tokens_in_a=None,
-            tokens_out_a=None,
-            cost_usd_a=None,
-            redactions=redactions,
-        )
-        append_log(entry, log_path=log_path)
-        return
-
-    # ── 4. token-count guard ──────────────────────────────────────────────────
-    if is_above_token_limit(scrubbed_text):
-        entry = build_log_entry(
-            session_id=session_id,
-            path_a=None,
-            skip_reason_a="token_limit",
-            tokens_in_a=None,
-            tokens_out_a=None,
-            cost_usd_a=None,
-            redactions=redactions,
-        )
-        append_log(entry, log_path=log_path)
-        return
-
-    # ── 5. dedup check ────────────────────────────────────────────────────────
-    if is_duplicate_session(session_id, index_path=index_path):
-        entry = build_log_entry(
-            session_id=session_id,
-            path_a=None,
-            skip_reason_a="duplicate",
-            tokens_in_a=None,
-            tokens_out_a=None,
-            cost_usd_a=None,
-            redactions=redactions,
-        )
-        append_log(entry, log_path=log_path)
+    # ── 2–5. pre-flight skips (excluded command / threshold / tokens / dedup) ─
+    if uses_excluded_command(transcript):
+        skip = "excluded_command"
+    elif is_below_threshold(transcript):
+        skip = "threshold"
+    elif is_above_token_limit(scrubbed_text):
+        skip = "token_limit"
+    elif is_duplicate_session(session_id, index_path=index_path):
+        skip = "duplicate"
+    else:
+        skip = None
+    if skip:
+        _log_skip(session_id, skip, redactions, log_path=log_path)
         return
 
     # ── 6. project derivation ─────────────────────────────────────────────────
@@ -924,27 +901,22 @@ def _load_transcript(transcript_path: str) -> list[dict]:
                 continue
             try:
                 obj = json.loads(line)
-                if obj.get("type") == "user" or obj.get("role") == "user":
-                    raw = obj.get("message", {}).get("content", obj.get("content", ""))
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": _extract_text(raw),
-                            # Raw blocks travel alongside the text-only content so
-                            # render_transcript can surface tool activity to the model
-                            # while the filters keep reading content only.
-                            "blocks": raw if isinstance(raw, list) else None,
-                        }
-                    )
-                elif obj.get("type") == "assistant" or obj.get("role") == "assistant":
-                    raw = obj.get("message", {}).get("content", obj.get("content", ""))
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": _extract_text(raw),
-                            "blocks": raw if isinstance(raw, list) else None,
-                        }
-                    )
+                for role in ("user", "assistant"):
+                    if obj.get("type") == role or obj.get("role") == role:
+                        raw = obj.get("message", {}).get(
+                            "content", obj.get("content", "")
+                        )
+                        messages.append(
+                            {
+                                "role": role,
+                                "content": _extract_text(raw),
+                                # Raw blocks travel alongside the text-only content
+                                # so render_transcript can surface tool activity to
+                                # the model while the filters keep reading content.
+                                "blocks": raw if isinstance(raw, list) else None,
+                            }
+                        )
+                        break
             except json.JSONDecodeError:
                 continue
     return messages
@@ -976,17 +948,7 @@ def main():
         # sessions invisible to the weekly no-capture alarm (15 unlogged
         # losses in W28 alone). Never let the logging itself fail the hook.
         try:
-            append_log(
-                build_log_entry(
-                    session_id=session_id,
-                    path_a=None,
-                    skip_reason_a="transcript_missing",
-                    tokens_in_a=None,
-                    tokens_out_a=None,
-                    cost_usd_a=None,
-                    redactions={},
-                )
-            )
+            _log_skip(session_id, "transcript_missing", {})
         except Exception as log_exc:
             _log_error(f"Failed to log transcript_missing: {log_exc}")
         sys.exit(0)

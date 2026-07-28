@@ -1,12 +1,9 @@
 """Unit tests for project derivation from cwd + token-count ceiling."""
 
-import sys
-import pathlib
 import subprocess
 
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "hooks"))
 
 from curate import derive_project, is_above_token_limit, CAPTURE_MAX_EST_TOKENS
 
