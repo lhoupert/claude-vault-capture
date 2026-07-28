@@ -195,9 +195,11 @@ def render_frontmatter(
 def is_duplicate_session(
     session_id: str,
     *,
-    index_path: pathlib.Path = INDEX_PATH,
+    index_path: pathlib.Path | None = None,
 ) -> bool:
     """Return True if session_id already appears in the index TSV."""
+    if index_path is None:
+        index_path = INDEX_PATH
     if not index_path.exists():
         return False
     with open(index_path, encoding="utf-8") as fh:
@@ -303,8 +305,16 @@ def build_log_entry(
 # ── concurrent-safe append ────────────────────────────────────────────────────
 
 
-def append_log(entry: dict, *, log_path: pathlib.Path = LOG_PATH) -> None:
-    """Append one JSON line to log_path with cross-process flock + in-process lock."""
+def append_log(entry: dict, *, log_path: pathlib.Path | None = None) -> None:
+    """Append one JSON line to log_path with cross-process flock + in-process lock.
+
+    log_path resolves to the module-level LOG_PATH at call time (not frozen as a
+    default arg) so tests that monkeypatch curate.LOG_PATH are honored even for
+    call sites that don't thread an explicit path — main()'s transcript_missing
+    logging wrote 6 test rows into the live W30 log via the frozen default.
+    """
+    if log_path is None:
+        log_path = LOG_PATH
     line = json.dumps(entry) + "\n"
     with _STATE_LOCK:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,9 +330,11 @@ def _append_index(
     path_a: str | None,
     date_str: str,
     *,
-    index_path: pathlib.Path = INDEX_PATH,
+    index_path: pathlib.Path | None = None,
 ) -> None:
     """Append one line to session-index.tsv, creating the file with header if absent."""
+    if index_path is None:
+        index_path = INDEX_PATH
     index_path.parent.mkdir(parents=True, exist_ok=True)
     with _STATE_LOCK:
         with open(index_path, "a", encoding="utf-8") as fh:
@@ -346,13 +358,14 @@ def _use_subscription() -> bool:
 
 def _invoke_model(
     model: str, max_tokens: int, system_prompt: str, user_text: str
-) -> tuple[str, int, int]:
+) -> tuple[str, int | None, int | None]:
     """Single-shot request. Returns (raw_text, tokens_in, tokens_out).
 
     Routes through the Claude Max subscription when CAPTURE_USE_SUBSCRIPTION=1,
     otherwise the metered Anthropic Messages API. Both transports raise
     TimeoutError on a >TIMEOUT_SECONDS call, which run_capture maps to the
-    `timeout` skip reason.
+    `timeout` skip reason. Token counts are None when the transport could not
+    observe usage (the subscription salvage path) — never a fabricated 0.
     """
     if _use_subscription():
         return _invoke_via_subscription(model, system_prompt, user_text)
@@ -401,14 +414,22 @@ _SUBSCRIPTION_DIRECTIVE = (
 
 def _invoke_via_subscription(
     model: str, system_prompt: str, user_text: str
-) -> tuple[str, int, int]:
+) -> tuple[str, int | None, int | None]:
     """Drive the model through the Claude Code runtime using subscription auth.
 
     Auth comes from CLAUDE_CODE_OAUTH_TOKEN (see `claude setup-token`). The
     runtime controls output length, so max_tokens has no equivalent here — our
-    prompts already constrain the response to compact JSON. Runs single-shot
-    (max_turns=1) with no tools, so this stays a pure text→text call. The user
-    text is prefixed with _SUBSCRIPTION_DIRECTIVE to suppress agentic behavior.
+    prompts already constrain the response to compact JSON. tools=[] disables
+    the runtime's built-in toolset so this stays a pure text→text call
+    (allowed_tools only skips permission prompting, it does not remove tools);
+    the user text is prefixed with _SUBSCRIPTION_DIRECTIVE to suppress agentic
+    behavior. max_turns is a safety valve, not a single-shot constraint: at
+    max_turns=1 the CLI ends the run with error_max_turns whenever the agent
+    burns its only turn on anything but the final reply, discarding paid
+    output (regression provenance: tests/test_subscription_invoke.py). A reply
+    that streamed before an error result is kept — see the salvage below. Note
+    CAPTURE_TIMEOUT_SECONDS bounds the whole run, not one turn; raise it, not
+    max_turns, if legitimate multi-turn recoveries start logging `timeout`.
     """
     import asyncio
     from claude_agent_sdk import (
@@ -421,34 +442,62 @@ def _invoke_via_subscription(
 
     prompt = _SUBSCRIPTION_DIRECTIVE + user_text
 
-    async def _run() -> tuple[str, int, int]:
+    async def _run() -> tuple[str, int | None, int | None]:
         options = ClaudeAgentOptions(
             system_prompt=system_prompt,
             model=model,
-            max_turns=1,
+            max_turns=4,
+            tools=[],
             allowed_tools=[],
         )
-        parts: list[str] = []
-        tokens_in = tokens_out = 0
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        parts.append(block.text)
-            elif isinstance(message, ResultMessage):
-                usage = message.usage or {}
-                # The runtime serves most input from cache (its own ~22k-token harness
-                # system prompt dominates), so input_tokens alone is misleadingly tiny.
-                # Sum all three to reflect what the model actually processed. Note this
-                # makes subscription cost estimates non-comparable to API mode: they
-                # include Claude Code's harness overhead the subscription absorbs.
-                tokens_in = (
-                    (usage.get("input_tokens", 0) or 0)
-                    + (usage.get("cache_creation_input_tokens", 0) or 0)
-                    + (usage.get("cache_read_input_tokens", 0) or 0)
-                )
-                tokens_out = usage.get("output_tokens", 0) or 0
-        return "".join(parts).strip(), tokens_in, tokens_out
+        parts: list[str] = []  # every text block in stream order, for salvage
+        reply: list[str] = []  # text of the latest assistant message only
+        tokens_in: int | None = None
+        tokens_out: int | None = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, AssistantMessage):
+                    texts = [
+                        b.text for b in message.content if isinstance(b, TextBlock)
+                    ]
+                    parts.extend(texts)
+                    if texts:
+                        reply = texts
+                elif isinstance(message, ResultMessage):
+                    usage = message.usage or {}
+                    # The runtime serves most input from cache (its own ~22k-token harness
+                    # system prompt dominates), so input_tokens alone is misleadingly tiny.
+                    # Sum all three to reflect what the model actually processed. Note this
+                    # makes subscription cost estimates non-comparable to API mode: they
+                    # include Claude Code's harness overhead the subscription absorbs, and
+                    # a multi-turn run repeats the cache-read sum per turn, so this is an
+                    # upper-bound estimate.
+                    tokens_in = (
+                        (usage.get("input_tokens", 0) or 0)
+                        + (usage.get("cache_creation_input_tokens", 0) or 0)
+                        + (usage.get("cache_read_input_tokens", 0) or 0)
+                    )
+                    tokens_out = usage.get("output_tokens", 0) or 0
+        except Exception as exc:
+            # The CLI exits non-zero after an error result (e.g. error_max_turns)
+            # and the SDK surfaces that as an exception mid-iteration — after the
+            # reply text already streamed. Discarding it loses a paid, often-
+            # complete response. The terminal ResultMessage rarely arrives on
+            # this path, so tokens usually stay None (unknown, never a fake 0).
+            if not parts:
+                raise
+            _log_error(
+                f"SUBSCRIPTION_SALVAGE partial reply kept (usage "
+                f"{'captured' if tokens_out is not None else 'not captured'}) "
+                f"after: {exc}"
+            )
+            # Everything that streamed, in order: the downstream outermost-brace
+            # salvage in _call_path_a can dig JSON out of preamble+reply text.
+            return "".join(parts).strip(), tokens_in, tokens_out
+        # Only the latest assistant message is the reply. A multi-turn run may
+        # emit preamble text on early turns; concatenating it would turn an
+        # exact-match `null` reply into malformed_json downstream.
+        return "".join(reply).strip(), tokens_in, tokens_out
 
     # asyncio.TimeoutError is TimeoutError on 3.11+, so the existing
     # `except TimeoutError` in run_capture catches a stalled subscription call.
@@ -464,15 +513,33 @@ def _call_path_a(scrubbed_text: str, prompts_dir: pathlib.Path) -> dict | None:
 
     system_prompt = (prompts_dir / "curation-system-prompt.md").read_text()
 
-    # Sum tokens across attempts so a retry's cost is fully accounted for.
+    # Sum tokens across attempts so a retry's cost is fully accounted for. A
+    # salvaged subscription reply arrives with unknown usage (None); once any
+    # attempt's usage is lost the totals are unknown too, and the log gets
+    # null rather than an understated number.
     tokens_in = tokens_out = 0
+    usage_lost = False
+
+    def _usage() -> dict:
+        if usage_lost:
+            return {"tokens_in": None, "tokens_out": None, "cost_usd": None}
+        return {
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            # Under subscription this is an estimated API-equivalent cost, not billed.
+            "cost_usd": _estimate_cost_a(tokens_in, tokens_out),
+        }
+
     data: dict | None = None
     for _attempt in range(PATH_A_NULL_RETRIES + 1):
         text, tin, tout = _invoke_model(
             MODEL_A, MAX_TOKENS_A, system_prompt, scrubbed_text
         )
-        tokens_in += tin
-        tokens_out += tout
+        if tin is None or tout is None:
+            usage_lost = True
+        else:
+            tokens_in += tin
+            tokens_out += tout
         raw = _strip_fences(text)
         if raw.lower() == "null":
             data = None
@@ -495,21 +562,12 @@ def _call_path_a(scrubbed_text: str, prompts_dir: pathlib.Path) -> dict | None:
                 # Malformed JSON is not a null; don't retry it (keep the prior
                 # behavior). Attach accumulated usage for the caller's cost log.
                 _log_error(f"PATH_A malformed_json: {raw[:200]}")
-                exc.usage = {  # type: ignore[attr-defined]
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "cost_usd": _estimate_cost_a(tokens_in, tokens_out),
-                }
+                exc.usage = _usage()  # type: ignore[attr-defined]
                 raise
             data = salvaged
         break  # got an artifact
 
-    usage = {
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        # Under subscription this is an estimated API-equivalent cost, not billed.
-        "cost_usd": _estimate_cost_a(tokens_in, tokens_out),
-    }
+    usage = _usage()
     if data is None:
         return {**usage, "_null": True}
     data.update(usage)
@@ -669,16 +727,22 @@ def run_capture(
     transcript: list[dict],
     session_id: str,
     cwd: str,
-    vault_dir: str | pathlib.Path = VAULT_DIR,
-    log_path: pathlib.Path = LOG_PATH,
-    index_path: pathlib.Path = INDEX_PATH,
+    vault_dir: str | pathlib.Path | None = None,
+    log_path: pathlib.Path | None = None,
+    index_path: pathlib.Path | None = None,
     date_str: str | None = None,
     prompts_dir: pathlib.Path | None = None,
 ) -> None:
     """Full capture pipeline: scrub → threshold → dedup → API calls → write → log."""
     import scrub as scrub_mod
 
+    if vault_dir is None:
+        vault_dir = VAULT_DIR
     vault_dir = pathlib.Path(vault_dir)
+    if log_path is None:
+        log_path = LOG_PATH
+    if index_path is None:
+        index_path = INDEX_PATH
     if prompts_dir is None:
         prompts_dir = pathlib.Path(__file__).parent.parent / "prompts"
     if date_str is None:

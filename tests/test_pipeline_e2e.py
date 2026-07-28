@@ -245,4 +245,14 @@ class TestCredentialGuards:
             run_main(missing, "gone00112233aabb0012", "/tmp")
         assert exc.value.code == 0
         assert _no_files(temp_vault)
-        assert not temp_vault.log_path.exists()
+        # The miss must be logged (to the temp log, never the real one): these
+        # sessions were invisible to the weekly no-capture alarm before
+        # skip_reason transcript_missing existed.
+        entries = [
+            json.loads(line)
+            for line in temp_vault.log_path.read_text().splitlines()
+            if line.strip()
+        ]
+        assert len(entries) == 1
+        assert entries[0]["skip_reason_a"] == "transcript_missing"
+        assert entries[0]["path_a"] is None

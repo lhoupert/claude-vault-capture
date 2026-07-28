@@ -47,6 +47,24 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_eval_state(monkeypatch, tmp_path_factory):
+    """Point curate's module-level state paths at a temp dir for every test.
+
+    Path defaults in curate.py resolve these globals at call time, so this
+    guard catches any call site that doesn't thread an explicit path — the
+    transcript_missing logging in main() wrote 6 rows into the live W30
+    eval/state/log.md exactly that way (session id gone00112233aabb0012).
+    """
+    import curate
+
+    state = tmp_path_factory.mktemp("eval-state-guard")
+    monkeypatch.setattr(curate, "LOG_PATH", state / "log.md")
+    monkeypatch.setattr(curate, "INDEX_PATH", state / "session-index.tsv")
+    monkeypatch.setattr(curate, "VAULT_DIR", state / "vault")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_scrub_failures_path():
     """Re-establish the temp failures path before each test.
 
@@ -124,23 +142,15 @@ def temp_vault(tmp_path):
 def run_main(monkeypatch, temp_vault):
     """Invoke curate.main() against the temp vault, returning the parsed log entries.
 
-    main() takes no vault/log/index arguments — its run_capture call uses the
-    module-level defaults (VAULT_DIR resolves CAPTURE_VAULT_DIR, else ~/Obsidian).
-    We therefore wrap run_capture (rather than patch the module constant) so the
-    temp paths are injected: main() resolves run_capture as a module global at
-    call time, so the wrapper is picked up.
+    curate resolves VAULT_DIR/LOG_PATH/INDEX_PATH at call time, so pointing the
+    module globals at temp_vault covers every path main() can take: run_capture's
+    defaults and the direct transcript_missing append_log alike.
     """
     import curate
 
-    real_run_capture = curate.run_capture
-
-    def _wrapped(**kwargs):
-        kwargs.setdefault("vault_dir", str(temp_vault.vault_dir))
-        kwargs.setdefault("log_path", temp_vault.log_path)
-        kwargs.setdefault("index_path", temp_vault.index_path)
-        return real_run_capture(**kwargs)
-
-    monkeypatch.setattr(curate, "run_capture", _wrapped)
+    monkeypatch.setattr(curate, "LOG_PATH", temp_vault.log_path)
+    monkeypatch.setattr(curate, "INDEX_PATH", temp_vault.index_path)
+    monkeypatch.setattr(curate, "VAULT_DIR", temp_vault.vault_dir)
 
     def _run(transcript_path, session_id, cwd):
         monkeypatch.setattr(
