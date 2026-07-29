@@ -110,7 +110,11 @@ _TAG_BAD_RE = re.compile(r"[^a-z0-9-]+")
 def sanitize_type(fm_type) -> str:
     """Collapse anything off the artifact-type allowlist to 'decision'."""
     # isinstance guard: an unhashable model value (list/dict) must not raise
-    return fm_type if isinstance(fm_type, str) and fm_type in _ALLOWED_TYPES else "decision"
+    return (
+        fm_type
+        if isinstance(fm_type, str) and fm_type in _ALLOWED_TYPES
+        else "decision"
+    )
 
 
 def sanitize_tag(tag) -> str:
@@ -256,7 +260,9 @@ def render_frontmatter(
         return json.dumps(str(v), ensure_ascii=False)
 
     tags_yaml = "[" + ", ".join(q(t) for t in tags) + "]"
-    redact_yaml = "{" + ", ".join(f"{q(k)}: {int(v)}" for k, v in redactions.items()) + "}"
+    redact_yaml = (
+        "{" + ", ".join(f"{q(k)}: {int(v)}" for k, v in redactions.items()) + "}"
+    )
     cost_str = f"{cost_usd:.4f}" if cost_usd is not None else "null"
     return (
         f"---\n"
@@ -1008,7 +1014,9 @@ def run_capture(
         # the call was already paid for.
         _tags = result_a.get("tags", [])
         result_a["tags"] = (
-            [scrub_mod.scrub(str(x))[0] for x in _tags] if isinstance(_tags, list) else []
+            [scrub_mod.scrub(str(x))[0] for x in _tags]
+            if isinstance(_tags, list)
+            else []
         )
         _links = result_a.get("source_links", [])
         result_a["source_links"] = (

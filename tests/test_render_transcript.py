@@ -232,12 +232,30 @@ class TestSecretsSurviveTruncation:
 
     def _blocks(self, kind):
         if kind == "error":
-            return [{"type": "tool_result", "is_error": True, "content": "auth failed " + self.PEM}]
+            return [
+                {
+                    "type": "tool_result",
+                    "is_error": True,
+                    "content": "auth failed " + self.PEM,
+                }
+            ]
         if kind == "out":
             return [{"type": "tool_result", "content": "cat id_ed25519\n" + self.PEM}]
         if kind == "bash":
-            return [{"type": "tool_use", "name": "Bash", "input": {"command": "echo '" + self.PEM + "'"}}]
-        return [{"type": "tool_use", "name": "Write", "input": {"file_path": "/k", "content": self.PEM}}]
+            return [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": "echo '" + self.PEM + "'"},
+                }
+            ]
+        return [
+            {
+                "type": "tool_use",
+                "name": "Write",
+                "input": {"file_path": "/k", "content": self.PEM},
+            }
+        ]
 
     @pytest.mark.parametrize("kind", ["error", "out", "bash", "write"])
     def test_pem_never_survives_a_capped_block(self, kind):

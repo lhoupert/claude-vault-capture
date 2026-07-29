@@ -221,18 +221,30 @@ class TestYamlRoundTrip:
     house-style 'Decision: …' titles produced unparseable frontmatter."""
 
     EXPECTED_KEYS = {
-        "title", "type", "project", "tags", "source",
-        "session_id", "created", "model", "cost_usd", "redactions",
+        "title",
+        "type",
+        "project",
+        "tags",
+        "source",
+        "session_id",
+        "created",
+        "model",
+        "cost_usd",
+        "redactions",
     }
 
     @staticmethod
     def _render(**overrides):
         kwargs = dict(
             title="Decision: Use PostgreSQL with PgBouncer",
-            fm_type="decision", project="my-project",
-            tags=["claude-code", "curated"], source="claude-code-curated",
-            session_id="abc-123", created="2026-04-23",
-            model="claude-sonnet-4-6", cost_usd=0.0123,
+            fm_type="decision",
+            project="my-project",
+            tags=["claude-code", "curated"],
+            source="claude-code-curated",
+            session_id="abc-123",
+            created="2026-04-23",
+            model="claude-sonnet-4-6",
+            cost_usd=0.0123,
             redactions={"env_var": 2},
         )
         kwargs.update(overrides)
@@ -244,7 +256,10 @@ class TestYamlRoundTrip:
         return data
 
     def test_colon_title_house_style_parses(self):
-        assert self._parse(self._render())["title"] == "Decision: Use PostgreSQL with PgBouncer"
+        assert (
+            self._parse(self._render())["title"]
+            == "Decision: Use PostgreSQL with PgBouncer"
+        )
 
     def test_hostile_tag_cannot_inject_keys(self):
         data = self._parse(self._render(tags=["ok", "x\nsource: attacker", "a]b"]))

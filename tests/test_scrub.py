@@ -15,9 +15,7 @@ import pytest
 # repo and every clone of it.
 def _pem(kind: str, body: str) -> str:
     marker = "-----{edge} " + kind + " KEY-----"
-    return (
-        marker.format(edge="BEGIN") + "\n" + body + "\n" + marker.format(edge="END")
-    )
+    return marker.format(edge="BEGIN") + "\n" + body + "\n" + marker.format(edge="END")
 
 
 def load_fixture(name: str) -> str:
@@ -35,9 +33,7 @@ class TestPrivateKey:
     def test_redacts_full_block(self):
         from scrub import scrub
 
-        text = (
-            "prefix\n" + _pem("RSA PRIVATE", "AAABBBCCC\nDDDEEEFFF") + "\nsuffix"
-        )
+        text = "prefix\n" + _pem("RSA PRIVATE", "AAABBBCCC\nDDDEEEFFF") + "\nsuffix"
         out, counts = scrub(text)
         assert "<redacted:private_key>" in out
         assert "AAABBBCCC" not in out
@@ -402,7 +398,11 @@ class TestTokenPrefixFalsePositives:
 
     @pytest.mark.parametrize(
         "text",
-        ["risk-averse-approach here", "the task-list-item is long", "disk-usage and task-list.md"],
+        [
+            "risk-averse-approach here",
+            "the task-list-item is long",
+            "disk-usage and task-list.md",
+        ],
     )
     def test_hyphenated_words_untouched(self, text):
         from scrub import scrub
@@ -416,6 +416,8 @@ class TestAwsSecret:
     def test_credentials_file_form(self):
         from scrub import scrub
 
-        out, counts = scrub("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYFAKE40")
+        out, counts = scrub(
+            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYFAKE40"
+        )
         assert "wJalrXUtnFEMI" not in out
         assert counts["aws_secret"] >= 1
