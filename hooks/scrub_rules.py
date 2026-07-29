@@ -15,9 +15,16 @@ RULES = [
     },
     {
         "name": "token_prefix",
+        # sk- must reach past the vendor segment: modern OpenAI keys are
+        # sk-proj-…/sk-svcacct-…, and a charset stopping at the first dash
+        # redacts only the public "sk-proj" prefix while the key body stays in
+        # clear. It does NOT take `-` in the body, and it requires a word
+        # boundary plus a 16-char body, because a greedy sk-[A-Za-z0-9_\-]{4,}
+        # matches inside ordinary hyphenated prose ("risk-averse-approach").
         "pattern": (
             r"sk-ant-[A-Za-z0-9_\-]+"
-            r"|sk-[A-Za-z0-9]+"
+            r"|(?<![A-Za-z0-9])sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_]{16,}"
+            r"|github_pat_[A-Za-z0-9_]+"
             r"|gh[pousr]_[A-Za-z0-9]+"
             r"|xox[baprs]-[0-9]+-[A-Za-z0-9\-]+"
             r"|AKIA[0-9A-Z]{16}"
@@ -32,15 +39,44 @@ RULES = [
     },
     {
         "name": "env_var",
-        # Only the value is replaced; key name and spacing are kept for context
-        # (the whole pre-value span is captured and written back verbatim).
-        # [^\s#]+ means trailing comments survive intact.
-        # ^ anchored per-line via re.MULTILINE.
+        # Only the value is replaced; the whole pre-value span (group 'pre') is
+        # written back verbatim, so key name and spacing survive.
+        #
+        # Matches at line start OR after whitespace/quote/paren/colon, and
+        # accepts an export/set/env prefix. A ^-only anchor missed the two
+        # commonest shapes outright: `export KEY=…`, and an assignment on the
+        # first line of a message (render_transcript prefixes those with
+        # "[USER]: "). Both alternatives are zero-width, so 'pre' still spans
+        # the whole match up to the value.
+        #
+        # There is no mandatory leading [A-Z] before the keyword: with one, the
+        # keyword could never start at offset 0 of the name, so the commonest
+        # bare .env forms — PASSWORD=, TOKEN=, SECRET=, PASS= — were never
+        # redacted at all while `redactions:` still reported 0.
+        #
+        # Quoted values are consumed whole so `KEY="two words"` cannot leak past
+        # the first space; the bare [^\s#]+ branch still leaves comments intact.
         "pattern": (
-            r"^(?P<pre>[ \t]*(?P<k>[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|CREDENTIAL|API)[A-Z0-9_]*)"
-            r"[ \t]*=[ \t]*)(?P<v>[^\s#]+)"
+            r"(?:^|(?<=[\s:;\"'`(]))"
+            r"(?P<pre>(?:export[ \t]+|set[ \t]+|env[ \t]+)?"
+            r"(?P<k>[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|CREDENTIAL|API)[A-Z0-9_]*)"
+            r"[ \t]*=[ \t]*)"
+            r"(?P<v>\"[^\"\n]*\"|'[^'\n]*'|[^\s#]+)"
         ),
         "replacement": r"\g<pre><redacted:env_var>",
+    },
+    {
+        "name": "aws_secret",
+        # ~/.aws/credentials uses lowercase keys and `=` or `:`, so the 40-char
+        # secret (the half that actually grants access, unlike the AKIA id)
+        # escapes env_var, whose key pattern requires uppercase.
+        # (?i:…) is scoped, not global: a bare (?i) anywhere but position 0 is a
+        # hard error in modern Python, and 'pre' has to come first here.
+        "pattern": (
+            r"(?P<pre>(?i:aws_secret_access_key|aws_session_token)[ \t]*[=:][ \t]*)"
+            r"(?P<v>\"[^\"\n]*\"|'[^'\n]*'|[^\s#]+)"
+        ),
+        "replacement": r"\g<pre><redacted:aws_secret>",
     },
     {
         "name": "bearer",

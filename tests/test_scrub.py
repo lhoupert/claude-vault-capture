@@ -3,13 +3,27 @@
 import os
 import pathlib
 
+import pytest
+
 
 # ─────────────────────────── helpers ──────────────────────────────────────────
 
 
+# PEM markers are assembled at runtime, never stored verbatim (in fixtures OR
+# this file): GitHub push protection and gitleaks match the BEGIN/END lines
+# themselves, fake body or not, so a real-format block at rest would flag this
+# repo and every clone of it.
+def _pem(kind: str, body: str) -> str:
+    marker = "-----{edge} " + kind + " KEY-----"
+    return marker.format(edge="BEGIN") + "\n" + body + "\n" + marker.format(edge="END")
+
+
 def load_fixture(name: str) -> str:
     p = pathlib.Path(__file__).parent.parent / "eval" / "fixtures" / name
-    return p.read_text()
+    return p.read_text().replace(
+        "@@PEM_BEGIN@@\nFAKE_PRIVATE_KEY_BODY\n@@PEM_END@@",
+        _pem("RSA PRIVATE", "FAKE_PRIVATE_KEY_BODY"),
+    )
 
 
 # ─────────────────────────── basic redaction ──────────────────────────────────
@@ -19,14 +33,7 @@ class TestPrivateKey:
     def test_redacts_full_block(self):
         from scrub import scrub
 
-        text = (
-            "prefix\n"
-            "-----BEGIN RSA PRIVATE KEY-----\n"
-            "AAABBBCCC\n"
-            "DDDEEEFFF\n"
-            "-----END RSA PRIVATE KEY-----\n"
-            "suffix"
-        )
+        text = "prefix\n" + _pem("RSA PRIVATE", "AAABBBCCC\nDDDEEEFFF") + "\nsuffix"
         out, counts = scrub(text)
         assert "<redacted:private_key>" in out
         assert "AAABBBCCC" not in out
@@ -35,7 +42,7 @@ class TestPrivateKey:
     def test_redacts_ec_key(self):
         from scrub import scrub
 
-        text = "-----BEGIN EC PRIVATE KEY-----\nABC\n-----END EC PRIVATE KEY-----"
+        text = _pem("EC PRIVATE", "ABC")
         out, counts = scrub(text)
         assert "<redacted:private_key>" in out
         assert counts["private_key"] >= 1
@@ -44,7 +51,7 @@ class TestPrivateKey:
         r"""Prove cross-line matching works via [\s\S] without re.DOTALL."""
         from scrub import scrub
 
-        text = "a\n-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nb"
+        text = "a\n" + _pem("PRIVATE", "SECRET") + "\nb"
         out, _ = scrub(text)
         assert "SECRET" not in out
 
@@ -339,3 +346,78 @@ class TestMalformedRule:
             scrub_rules.RULES[:] = original_rules
             importlib.reload(scrub_mod)
             os.environ.pop("SCRUB_FAILURES_PATH", None)
+
+
+class TestBareKeywordEnvVars:
+    """The commonest .env / docker-compose forms: the keyword IS the whole name.
+    A mandatory leading [A-Z] in the key pattern made these unmatchable, so every
+    one passed through in clear while `redactions:` still reported 0."""
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "PASSWORD=s3cr3tvalue",
+            "TOKEN=s3cr3tvalue",
+            "SECRET=s3cr3tvalue",
+            "KEY_ID=s3cr3tvalue",
+            "export PASSWORD=s3cr3tvalue",
+            "[USER]: TOKEN=s3cr3tvalue",
+        ],
+    )
+    def test_bare_keyword_names_are_redacted(self, line):
+        from scrub import scrub
+
+        out, counts = scrub(line)
+        assert "s3cr3tvalue" not in out
+        assert counts["env_var"] >= 1
+
+    def test_quoted_value_fully_consumed(self):
+        from scrub import scrub
+
+        out, _ = scrub('API_KEY="my secret value"')
+        assert "secret value" not in out
+
+
+class TestModernTokenFormats:
+    def test_openai_project_key_body_does_not_survive(self):
+        from scrub import scrub
+
+        out, _ = scrub("key: sk-proj-Ab12Cd34_Ef56Gh78Ij90Kl12Mn34Op56")
+        assert "Ab12Cd34" not in out
+
+    def test_fine_grained_github_pat(self):
+        from scrub import scrub
+
+        out, counts = scrub("github_pat_11ABCDEFG0_abcdefghijklmnopqrstuv")
+        assert "github_pat_11ABCDEFG0" not in out
+        assert counts["token_prefix"] >= 1
+
+
+class TestTokenPrefixFalsePositives:
+    """The widened `sk-` alternative must not eat ordinary hyphenated prose."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "risk-averse-approach here",
+            "the task-list-item is long",
+            "disk-usage and task-list.md",
+        ],
+    )
+    def test_hyphenated_words_untouched(self, text):
+        from scrub import scrub
+
+        out, counts = scrub(text)
+        assert out == text
+        assert counts["token_prefix"] == 0
+
+
+class TestAwsSecret:
+    def test_credentials_file_form(self):
+        from scrub import scrub
+
+        out, counts = scrub(
+            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYFAKE40"
+        )
+        assert "wJalrXUtnFEMI" not in out
+        assert counts["aws_secret"] >= 1
