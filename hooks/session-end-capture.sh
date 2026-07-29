@@ -4,6 +4,24 @@ set -euo pipefail
 
 HOOKS_LOG="$HOME/.claude/hooks.log"
 
+# Print a credential file's contents only if it is owner-only (mode *00); a
+# hand-made `echo $TOKEN > file` is 644, i.e. readable by every local user, and
+# must not be treated as a usable credential. -L follows symlinks so a token
+# symlinked to a 600 file is not refused with a chmod hint that cannot fix it.
+# GNU -c is probed first because BSD stat rejects it cleanly, whereas GNU stat
+# treats -f as "filesystem" and prints a multi-line blob.
+_read_secret_file() {
+    local f="$1" perms
+    perms="$(stat -L -c '%a' "$f" 2>/dev/null || stat -L -f '%Lp' "$f" 2>/dev/null)" || return 1
+    if [[ "$perms" != *00 ]]; then
+        mkdir -p "$(dirname "$HOOKS_LOG")"
+        printf 'CAPTURE_TOKEN_FILE_PERMS\t%s\t%s is mode %s (group/other-readable) — refusing to use it; run: chmod 600 %s\n' \
+            "${NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$f" "$perms" "$f" >> "$HOOKS_LOG"
+        return 1
+    fi
+    cat "$f"
+}
+
 # Resolve the repo from this script's own location so the checkout can live anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$SCRIPT_DIR")"
@@ -54,11 +72,11 @@ if [[ "${CAPTURE_USE_SUBSCRIPTION:-}" == "1" ]]; then
         # SC2155: export masks cat's exit code on purpose — a token-read hiccup must
         # not abort this close-path hook under `set -e`; curate.py handles missing creds.
         # shellcheck disable=SC2155
-        export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude_vault_oauth_token")"
+        export CLAUDE_CODE_OAUTH_TOKEN="$(_read_secret_file "$HOME/.claude_vault_oauth_token")"
     fi
 elif [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$HOME/.claude_vault_token" ]]; then
     # shellcheck disable=SC2155  # see rationale above: don't abort the close path
-    export ANTHROPIC_API_KEY="$(cat "$HOME/.claude_vault_token")"
+    export ANTHROPIC_API_KEY="$(_read_secret_file "$HOME/.claude_vault_token")"
 fi
 
 # Ground-truth marker BEFORE backgrounding (pre-log crash gap detection)
