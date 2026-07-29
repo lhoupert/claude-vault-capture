@@ -90,3 +90,30 @@ def test_malformed_then_artifact_recovers(monkeypatch):
     assert calls["n"] == 2
     assert result["title"] == "T"
     assert result["tokens_in"] == 220  # both attempts counted
+
+
+def test_malformed_then_null_is_logged_as_malformed_not_null(monkeypatch):
+    """A trailing null must not erase an unparseable reply from log.md: the
+    malformed_json rate is the instrument this failure class is tracked by, and
+    the resample budget is shared between the two classes."""
+    fake, calls = _seq(("continuing the conversation…", 100, 3), ("null", 90, 2))
+    monkeypatch.setattr(curate, "_invoke_model", fake)
+
+    with pytest.raises(json.JSONDecodeError) as exc:
+        curate._call_path_a("scrubbed", PROMPTS)
+
+    assert calls["n"] == 2
+    assert exc.value.usage["tokens_in"] == 190  # both attempts billed
+
+
+def test_null_then_artifact_still_recovers_after_the_shared_budget_rename(monkeypatch):
+    """The null contract is unchanged by sharing the budget with malformed."""
+    artifact = json.dumps({"title": "T", "type": "gotcha", "body": "B"})
+    fake, calls = _seq(("null", 100, 3), (artifact, 120, 40))
+    monkeypatch.setattr(curate, "_invoke_model", fake)
+
+    result = curate._call_path_a("scrubbed", PROMPTS)
+
+    assert calls["n"] == 2
+    assert result["title"] == "T"
+    assert curate.PATH_A_RESAMPLES == 1
