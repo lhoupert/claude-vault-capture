@@ -30,7 +30,7 @@ Timeouts passed via `config=` are ignored when `Repository.exists(storage)` ran 
 
 **What leaves your machine:** the session transcript — your prompts, Claude's replies, and a budgeted summary of tool activity (commands run, edit diffs, output heads, errors) — is sent to Anthropic's API after scrubbing. Secrets matching the [scrub rules](hooks/scrub_rules.py) are redacted first, but scrubbing is pattern-based and not a guarantee. If you work with material you can't send to a model API, don't install this.
 
-**What it costs:** roughly $0.01–0.05 per captured session on Sonnet, depending on transcript size. Sessions below the capture threshold cost nothing (no model call is made). Or bill it to a Claude Pro/Max plan instead — see [subscription mode](#using-your-claude-pro-or-max-subscription-instead-of-an-api-key).
+**What it costs:** measured over 240 real captures, a **median of $0.13 per captured session** (mean $0.13, max $0.62) at Sonnet list price — noticeably more than a glance at the prompt size suggests, because the curator is sent tool activity as well as the conversation. Sessions below the capture threshold cost nothing (no model call is made). Or bill it to a Claude Pro/Max plan instead — see [subscription mode](#using-your-claude-pro-or-max-subscription-instead-of-an-api-key).
 
 ## Install
 
