@@ -54,6 +54,8 @@ session-end-capture.sh  →  curate.py (backgrounded, nohup)
 - **Scrub runs twice.** On the transcript before any API call; on each model output before writing to disk.
 - **Title is always sanitized** before it appears in a filename, frontmatter, or wikilink.
 - **Fence-stripping before JSON parsing.** Models sometimes wrap JSON in ` ```json…``` ` despite prompt instructions. `_strip_fences()` is applied to every model response before `json.loads()`.
+- **The transcript is always terminated.** `_invoke_model` appends `_TRANSCRIPT_TAIL` once, before dispatching to either transport, closing the delimiter and restating the JSON-or-null contract. Without it the prompt is an unfinished chat log and the model writes the conversation's next turn instead of curating — the cause of every `malformed_json` in the archive. Never send transcript text as the last thing in a prompt, and keep the append at the dispatch point so a new transport can't forget it.
+- **Salvage requires artifact shape.** `_salvage_artifact()` only accepts an object carrying `title`/`type`/`body`. The write path defaults every missing field, so an unshaped dict (e.g. a fabricated `{"file_path": …}`) would otherwise be written to `Inbox/` as an empty "untitled" note.
 - **No writes outside `Inbox/`.** Promotions to structured vault folders happen only via explicit user approval in skill patches.
 - **`eval/state/` is gitignored.** Runtime state is never committed.
 
@@ -65,8 +67,8 @@ session-end-capture.sh  →  curate.py (backgrounded, nohup)
 | `threshold` | < 3 user turns OR < 1500 chars of user content |
 | `token_limit` | `len(scrubbed_text) // 4 > CAPTURE_MAX_EST_TOKENS` (default 50 000) |
 | `duplicate` | session_id already present in session-index.tsv |
-| `model_returned_null` | Sonnet returned the literal string `null` on both the initial call and the one retry |
-| `malformed_json` | model response isn't valid JSON even after fence-stripping (not retried) |
+| `model_returned_null` | Sonnet returned the literal string `null` on **every** attempt (initial call plus the one resample) |
+| `malformed_json` | at least one attempt was unparseable after fence-stripping and artifact salvage, and no attempt produced an artifact. Wins over `model_returned_null` in a mixed sequence, so a trailing null can't erase the unparseable reply from the log |
 | `timeout` | a model call exceeded `CAPTURE_TIMEOUT_SECONDS` (default 30 s) |
 | `error:<ExcType>` | any other exception |
 
