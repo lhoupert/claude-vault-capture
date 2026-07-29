@@ -3,6 +3,8 @@
 import yaml
 from curate import (
     sanitize_title,
+    sanitize_tag,
+    sanitize_type,
     sanitize_summary,
     make_slug,
     make_filename,
@@ -211,3 +213,59 @@ class TestDescriptionYaml:
         yaml_body = f"title: Test\ndescription: |\n{indented}\n"
         parsed = yaml.safe_load(yaml_body)
         assert "---" not in parsed["description"]
+
+
+class TestYamlRoundTrip:
+    """Rendered frontmatter must survive a real YAML parser — the contract
+    Obsidian holds us to. A partition-on-colon test parser masked that the
+    house-style 'Decision: …' titles produced unparseable frontmatter."""
+
+    EXPECTED_KEYS = {
+        "title", "type", "project", "tags", "source",
+        "session_id", "created", "model", "cost_usd", "redactions",
+    }
+
+    @staticmethod
+    def _render(**overrides):
+        kwargs = dict(
+            title="Decision: Use PostgreSQL with PgBouncer",
+            fm_type="decision", project="my-project",
+            tags=["claude-code", "curated"], source="claude-code-curated",
+            session_id="abc-123", created="2026-04-23",
+            model="claude-sonnet-4-6", cost_usd=0.0123,
+            redactions={"env_var": 2},
+        )
+        kwargs.update(overrides)
+        return render_frontmatter(**kwargs)
+
+    def _parse(self, fm):
+        data = yaml.safe_load(fm.split("---\n", 2)[1])
+        assert isinstance(data, dict)
+        return data
+
+    def test_colon_title_house_style_parses(self):
+        assert self._parse(self._render())["title"] == "Decision: Use PostgreSQL with PgBouncer"
+
+    def test_hostile_tag_cannot_inject_keys(self):
+        data = self._parse(self._render(tags=["ok", "x\nsource: attacker", "a]b"]))
+        assert set(data.keys()) == self.EXPECTED_KEYS
+        assert data["source"] == "claude-code-curated"
+
+    def test_hostile_type_cannot_break_block(self):
+        data = self._parse(self._render(fm_type="x\n---\nevil: 1"))
+        assert set(data.keys()) == self.EXPECTED_KEYS and "evil" not in data
+
+
+class TestSanitizers:
+    def test_type_allowlist(self):
+        for t in ("decision", "runbook", "gotcha", "spec"):
+            assert sanitize_type(t) == t
+        for t in ("Decision", "note\n---\n", "", None, 42, ["a"]):
+            assert sanitize_type(t) == "decision"
+
+    def test_tag_slug_coercion(self):
+        assert sanitize_tag("backend") == "backend"
+        assert sanitize_tag("x\nsource: attacker") == "x-source-attacker"
+        assert sanitize_tag("Réseau Backend") == "reseau-backend"
+        assert len(sanitize_tag("x" * 100)) == 40
+        assert sanitize_tag("!!!") == ""
