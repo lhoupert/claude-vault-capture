@@ -1,24 +1,22 @@
 # SPEC — Claude Code → Obsidian Vault Capture (Eval)
 
-Status: draft · Owner: loic · Eval window: 4 weeks from first working hook
-
-> **Amendment 2026-06-04 — Path B retired.** The eval concluded: the raw Haiku
-> baseline (Path B → `Inbox/raw/`) was almost never the version kept and its
-> unique catches were mostly out-of-scope, so it was removed. Capture is now a
-> single curated path (Path A → `Inbox/auto/`) that retries once on a
-> non-deterministic null. The two-path design described below is **historical**;
-> where this spec mentions Path B, `Inbox/raw/`, `claude-haiku-4-5-20251001`,
-> per-path failure isolation, or `*_b` log fields, read it as superseded. The
-> log/index schema is now **version 2** (no `*_b` fields). See
-> `eval/experiments/FINDINGS.md` for the evidence and
-> `claude-docs/2026-06-04-dual-pipeline-capture-keep-path-a-retire-path-b.md`
-> for the decision record.
-
-> **Note on paths.** This spec predates the portability work and shows the
-> author's absolute paths (`~/Obsidian/loics_vault`, `~/DevDS/claude-vault-capture`).
-> The shipped code does not hardcode these: the repo root is derived from each
-> file's location, and the vault is configured via `CAPTURE_VAULT_DIR`. See the
-> top-level `README.md` for current install and configuration.
+> # ⚠️ ARCHIVED — historical record, not current behaviour
+>
+> This is the **original April 2026 design spec**, kept because it records *why*
+> things were decided (the Inbox-only pattern, measuring miss-rate from the index
+> rather than a vault scan, the fail-open scrubber with a visible failure log, the
+> double locking, the known limitations of each scrub rule). Roughly half of what
+> follows describes a system that **no longer exists**.
+>
+> **Do not use this to understand how the tool works today.** In particular it
+> describes a two-path design (a raw Haiku baseline writing to `Inbox/raw/`) that
+> was retired 2026-06-04, a log schema with `*_b` fields that is two versions old,
+> the author's hardcoded absolute paths, and a standalone `install.sh` route that
+> the Claude Code plugin has since superseded.
+>
+> For current behaviour read **`CLAUDE.md`** (architecture and invariants) and
+> **`README.md`** (install and configuration). For the evidence behind retiring
+> the second path, read `eval/experiments/FINDINGS.md`.
 
 ## 1. Objective
 
@@ -494,4 +492,4 @@ Detect via `git -C "$VAULT" rev-parse --is-inside-work-tree 2>/dev/null`. Do not
 
 ---
 
-*This spec is the source of truth. Update it when decisions change — don't let it drift.*
+*Archived 2026-07-29. This document is no longer maintained; it is kept as a decision record.*

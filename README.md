@@ -4,71 +4,124 @@ Automatically turn your [Claude Code](https://claude.ai/code) sessions into note
 
 Nothing runs synchronously on session close (the hook returns in well under 200 ms); all model work is backgrounded. Secrets are scrubbed before anything is sent to a model and again before anything is written to disk.
 
-One curated summary is written per qualifying session:
+## What you get
 
-- **`Inbox/auto/`** — a *curated* artifact (Sonnet): a single decision, runbook, gotcha, or spec — or nothing, if the session was low-signal. A non-deterministic null is retried once before the session is dropped.
+At most one note per session, in `<vault>/Inbox/auto/`. A model reads the session and either extracts **one** durable artifact — a decision, runbook, gotcha, or spec — or returns nothing, if the session was low-signal. Most sessions produce nothing, by design.
 
-> An earlier version also wrote a raw Haiku baseline to `Inbox/raw/`. A 4-week A/B eval found it didn't earn its keep (it was almost never the version kept, and its unique catches were mostly out-of-scope) — so it was retired. See [`eval/experiments/FINDINGS.md`](eval/experiments/FINDINGS.md).
+A capture looks like this:
 
-## Prerequisites
+```markdown
+---
+title: "icechunk RepositoryConfig storage timeouts silently ignored"
+type: gotcha
+project: my-project
+tags: [claude-code, curated, icechunk, s3]
+source: claude-code-curated
+session_id: 4f3a91c2-...
+created: 2026-07-29
+model: claude-sonnet-4-6
+cost_usd: 0.0198
+---
 
-- Claude Code CLI, installed and in use
-- Python 3.11+ and [`uv`](https://docs.astral.sh/uv/)
-- An Obsidian vault (any location — you'll point the installer at it)
-- An `ANTHROPIC_API_KEY`, **or** a Claude Max subscription (see [below](#using-your-claude-max-subscription-instead-of-an-api-key))
+# icechunk RepositoryConfig storage timeouts silently ignored
+## Symptom
+Timeouts passed via `config=` are ignored when `Repository.exists(storage)` ran first…
+```
+
+**What leaves your machine:** the session transcript — your prompts, Claude's replies, and a budgeted summary of tool activity (commands run, edit diffs, output heads, errors) — is sent to Anthropic's API after scrubbing. Secrets matching the [scrub rules](hooks/scrub_rules.py) are redacted first, but scrubbing is pattern-based and not a guarantee. If you work with material you can't send to a model API, don't install this.
+
+**What it costs:** roughly $0.01–0.05 per captured session on Sonnet, depending on transcript size. Sessions below the capture threshold cost nothing (no model call is made). Or bill it to a Claude Pro/Max plan instead — see [subscription mode](#using-your-claude-pro-or-max-subscription-instead-of-an-api-key).
 
 ## Install
 
-Clone anywhere — the hook locates itself, so the path is up to you:
+Install it as a Claude Code plugin:
+
+```
+/plugin marketplace add developmentseed/skills
+/plugin install claude-vault-capture@skills
+```
+
+Claude Code prompts for your Obsidian vault path (and optionally an API key). The `SessionEnd` hook is registered automatically, the `/vault-save` skill becomes available, and runtime state is kept in the plugin's own data directory. Sensitive values (API key, OAuth token) go to your OS keychain.
+
+**This is the install route you want.** The rest of this README documents the repo itself — the upstream source for that plugin, useful if you're developing on it or need a rollback.
+
+<details>
+<summary><strong>Standalone install from this checkout</strong> (maintainers / rollback only)</summary>
+
+`install.sh` predates the plugin. It still works, but **do not run it if you have the plugin installed** — you would get two `SessionEnd` hooks, each with its own dedup index, so every session costs two model calls and writes two notes. If you previously ran `install.sh`, remove its entry from `~/.claude/settings.json` before installing the plugin.
 
 ```bash
-git clone https://github.com/lhoupert/claude-vault-capture
+git clone https://github.com/developmentseed/claude-vault-capture
 cd claude-vault-capture
 uv sync                                   # create .venv/ and install dependencies
 ./install.sh --vault ~/path/to/YourVault  # register the hook + point it at your vault
 ```
 
-If you omit `--vault`, the installer reads `CAPTURE_VAULT_DIR`, reuses a previous
-choice from `capture.env`, or prompts you. Your vault path is written to a
-gitignored `capture.env` and never committed.
+If you omit `--vault`, the installer reads `CAPTURE_VAULT_DIR`, reuses a previous choice from `capture.env`, or prompts you. Your vault path is written to a gitignored `capture.env` and never committed.
 
-The installer is idempotent — safe to re-run after updates. It:
+The installer is idempotent — safe to re-run after updates. It writes **outside this repo**, which matters if you later want to remove it:
 - Creates `<vault>/Inbox/auto/` and `<vault>/claude-docs/`
 - Registers the `SessionEnd` hook in `~/.claude/settings.json`
-- Writes `capture.env` with your `CAPTURE_VAULT_DIR`
-- Installs the `/vault-save` skill and its auto-trigger
+- Writes `capture.env` in the repo with your `CAPTURE_VAULT_DIR`
+- Installs a `/vault-save` skill at `~/.claude/skills/vault-save/`
+- Injects a marker-bounded trigger block into your global `~/.claude/CLAUDE.md`
 
-To use your Max subscription instead of an API key, also install the Agent SDK:
+To uninstall: delete the `SessionEnd` entry from `~/.claude/settings.json`, remove `~/.claude/skills/vault-save/`, and delete the `<!-- BEGIN claude-vault-capture: vault-save-trigger -->` block from `~/.claude/CLAUDE.md`. Captured notes already in your vault are yours to keep or delete.
+
+</details>
+
+## Making your credentials reachable by the hook
+
+**This step is required, and skipping it is the most common reason nothing gets captured.** Claude Code sanitizes the environment it spawns hooks with, so an `export ANTHROPIC_API_KEY=…` in your shell profile does **not** reach the capture worker. Write the credential to a file the hook reads instead. It must be owner-only — the hook refuses group- or world-readable credential files:
 
 ```bash
-uv sync --extra subscription
+umask 077 && printf '%s\n' "$ANTHROPIC_API_KEY" > ~/.claude_vault_token
+chmod 600 ~/.claude_vault_token    # required; a 644 file is ignored
 ```
+
+(Plugin users can instead set the API key in the plugin's config, where it's stored in your OS keychain.)
+
+For subscription mode, the equivalent file is `~/.claude_vault_oauth_token` — see [below](#using-your-claude-pro-or-max-subscription-instead-of-an-api-key).
 
 ## Verify it's working
 
-After your next Claude Code session ends, check:
+After your **next** session ends — the hook fires at session close, so the session you installed during doesn't count:
 
 ```bash
-# Hook fired?
+# 1. Did the hook fire?
 grep SESSION_END_RECEIVED ~/.claude/hooks.log | tail -5
 
-# What happened? (run from the repo)
+# 2. What did it decide? (standalone install; plugin state lives in its own data dir)
 tail -1 eval/state/log.md | python3 -m json.tool
 
-# Files written?
-ls "$(grep -E '^CAPTURE_VAULT_DIR=' capture.env | cut -d= -f2- | tr -d '\"')"/Inbox/auto/
+# 3. Was a note written?
+ls "$(grep -E '^CAPTURE_VAULT_DIR=' capture.env | cut -d= -f2- | tr -d '"')"/Inbox/auto/
 ```
 
-Sessions are silently skipped when: fewer than 3 user turns, under 1500 chars of user content, a command listed in `CAPTURE_EXCLUDED_COMMANDS` was used (empty by default — see [Consuming captures](#consuming-captures-the-inbox-contract)), or the session is already indexed.
+A `skip_reason_a` of `null` in step 2 means a note was written. Anything else is a skip.
+
+### Nothing was captured — what now?
+
+Most "it's broken" reports are one of the deliberate skips. Sessions are silently skipped when there are fewer than 3 user turns, under 1500 characters of your own content, the transcript exceeds the token ceiling, an excluded slash command was used, or the session is already indexed. **Test with a real, substantial session**, not a two-message one.
+
+If step 1 shows nothing, the hook isn't registered — check `~/.claude/settings.json` (or `/hooks` in Claude Code). If step 1 works but step 2 shows a problem, `~/.claude/hooks.log` names it:
+
+| In `hooks.log` | Meaning | Fix |
+|---|---|---|
+| `ANTHROPIC_API_KEY not set` | no credential reached the hook | write the token file above |
+| `CAPTURE_TOKEN_FILE_PERMS` | token file is group/other-readable | `chmod 600` the file it names |
+| `CAPTURE_NOT_CONFIGURED` | no vault path | re-run `install.sh --vault …` |
+| `skip_reason: timeout` | model call exceeded the deadline | raise `CAPTURE_TIMEOUT_SECONDS` |
+| `skip_reason: malformed_json` | model didn't return a usable artifact | usually transient; check it isn't every session |
 
 ## Tests
 
 ```bash
-uv run pytest          # 158 tests, no network, no API key needed
+uv run pytest          # full suite; no network, no API key needed
 ```
 
 An opt-in live test makes real model calls and is skipped unless `CAPTURE_LIVE_TESTS=1`.
-The installer has its own smoke test: `bash eval/run-install-smoke.sh`.
+Two harnesses cover the parts pytest doesn't: `bash eval/run-fixtures.sh` (pipeline against recorded fixtures) and `bash eval/run-install-smoke.sh` (installer, against temp dirs).
 
 If you plan to contribute, install the git hooks so the same checks CI runs
 (ruff, shellcheck, zizmor, tests) run locally first:
@@ -80,18 +133,21 @@ uv run pre-commit run --all-files  # run them all now
 
 ## Configuration
 
+Standalone installs read these from `capture.env` (the hook sources the whole file before launching the worker). Plugin installs set the equivalents in the plugin's config instead.
+
 | Env var | Default | Effect |
 |---|---|---|
-| `CAPTURE_VAULT_DIR` | — | **Required.** Your Obsidian vault path. Set by `install.sh` (via `--vault`/prompt) into `capture.env`, which the hook sources. |
-| `ANTHROPIC_API_KEY` | — | Required in API-key mode; falls back to `~/.claude_vault_token` |
-| `CAPTURE_USE_SUBSCRIPTION` | — | Set to `1` to bill model calls to your Claude Max subscription (see below) |
-| `CLAUDE_CODE_OAUTH_TOKEN` | — | Subscription auth; falls back to `~/.claude_vault_oauth_token` |
+| `CAPTURE_VAULT_DIR` | — | **Required.** Your Obsidian vault path. Set by `install.sh` (via `--vault`/prompt). |
+| `ANTHROPIC_API_KEY` | — | Required in API-key mode; falls back to `~/.claude_vault_token` (mode 600) |
+| `CAPTURE_USE_SUBSCRIPTION` | — | Set to `1` to bill model calls to your Claude Pro/Max subscription (see below) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | — | Subscription auth; falls back to `~/.claude_vault_oauth_token` (mode 600) |
+| `CAPTURE_TIMEOUT_SECONDS` | `30` | Hard wall on one model call. Raise it if large sessions log `timeout` — model work is backgrounded, so a higher value never delays session close |
 | `CAPTURE_MAX_EST_TOKENS` | `50000` | Token ceiling before skipping (~200 KB transcript) |
-| `CAPTURE_MOCK_SDK` | — | Set to `1` to skip API calls and use fixture responses |
 | `CAPTURE_EXCLUDED_COMMANDS` | — | Comma-separated slash commands whose sessions are not captured (e.g. `/my-journal,/my-recap`). Empty by default |
-
-Extra variables (e.g. `CAPTURE_USE_SUBSCRIPTION=1`) can be added to `capture.env` —
-the hook sources the whole file before launching the worker.
+| `CAPTURE_TOOL_CHARS_BUDGET` | `30000` | Max characters of rendered tool activity added to the model input |
+| `CAPTURE_SUCCESS_HEAD_CHARS` | `200` | Characters of each successful tool result included; `0` keeps only commands and errors |
+| `CAPTURE_MOCK_SDK` | — | Set to `1` to skip API calls and use fixture responses (testing) |
+| `SCRUB_FAILURES_PATH` | `eval/state/scrub-failures.md` | Where a failed scrub rule is logged (testing) |
 
 ### Using your Claude Pro or Max subscription instead of an API key
 
@@ -151,6 +207,10 @@ sub-200 ms close path. Rotate the token later with the same
 `security add-generic-password -U …` command, and revert to API-key mode by
 removing the two subscription lines from `capture.env`.
 
+> The Keychain route is `capture.env`-only, so it does **not** apply to plugin
+> installs — the plugin never reads `capture.env`. Set `oauth_token` in the
+> plugin's config (keychain-backed) or use the token file.
+
 **Verify it worked:** after your next session ends, `tail ~/.claude/hooks.log`
 should show a normal capture with no `CLAUDE_CODE_OAUTH_TOKEN not set` line, and
 the new `eval/state/log.md` entry will carry an *estimated* `cost_usd`.
@@ -177,32 +237,39 @@ An extension consumes:
 - Filenames: `YYYY-MM-DD-<slug>-<sid8>.md`. Frontmatter includes `session_id`,
   `created` (date), `source`, `type`, and `tags`.
 
-**Read-only runtime state** in the repo's gitignored `eval/state/`:
+**Read-only runtime state** — in the repo's gitignored `eval/state/` for standalone
+installs, or the plugin's own data directory for plugin installs:
 - `session-index.tsv` — `<session_id>\t<path_a_or_null>\t<date>` (schema_version 2).
 - `log.md` — per-session JSON-lines (skip reasons, costs, token counts).
 - `scrub-failures.md` — dated lines when a scrub rule failed.
 
-Extensions **read** these; they should never write into `eval/state/` (keep their own
+Extensions **read** these; they should never write into the state directory (keep their own
 state elsewhere). To stop the pipeline from archiving an extension's own workflow
-sessions, set **`CAPTURE_EXCLUDED_COMMANDS`** (comma-separated slash commands) in
-`capture.env` — empty by default, so the public pipeline captures everything.
+sessions, set **`CAPTURE_EXCLUDED_COMMANDS`** (comma-separated slash commands) —
+empty by default, so the public pipeline captures everything.
 
 The `/vault-save` skill (on-demand export of a Claude-generated document to your
-vault) is always installed.
+vault's `claude-docs/`) is always installed.
 
-## The eval
+## Design history
 
 Capture is a single curated path (`_call_path_a` in `hooks/curate.py`). It began
-as a two-path A/B eval (curated Sonnet vs raw Haiku baseline); the raw path was
-retired 2026-06-04 after the eval showed it didn't earn its keep — see
-[`eval/experiments/FINDINGS.md`](eval/experiments/FINDINGS.md). Per-session costs
-and skip reasons land in `eval/state/log.md` (gitignored JSON-lines):
+as a two-path A/B eval — curated Sonnet vs a raw Haiku baseline written to
+`Inbox/raw/`. The raw path was **retired 2026-06-04** after the eval showed it
+didn't earn its keep: it was almost never the version kept, and its unique
+catches were mostly out-of-scope. See
+[`eval/experiments/FINDINGS.md`](eval/experiments/FINDINGS.md) for the evidence.
+
+Per-session costs and skip reasons land in the state log (gitignored JSON-lines):
 
 ```bash
 jq -r '[.date, .skip_reason_a, .cost_usd_a] | @tsv' eval/state/log.md
 ```
 
-See `.github/SPEC.md` for the full specification and decision log.
+The original design spec is kept as a historical record at
+[`dev-notes/archive/2026-04-original-eval-spec.md`](dev-notes/archive/2026-04-original-eval-spec.md).
+It describes the retired two-path system and is **not** a guide to current
+behaviour — read `CLAUDE.md` for that.
 
 ## Project structure
 
@@ -212,13 +279,13 @@ hooks/
   curate.py                # full pipeline (scrub → filter → API → write → log)
   scrub.py / scrub_rules.py # secret scrubber (no network, pure stdlib)
 prompts/
-  curation-system-prompt.md  # Path A — Sonnet, may return null (retried once)
+  curation-system-prompt.md  # the curation prompt — may return null (resampled once)
 skill-patches/             # /vault-save skill + its global auto-trigger
 eval/
   fixtures/                # test transcripts and mock API responses
   state/                   # runtime-only (gitignored): log.md, session-index.tsv
 dev-notes/                 # historical design notes (not user docs)
-.github/SPEC.md            # specification and decision log
+CLAUDE.md                  # current architecture + invariants
 ```
 
 ## License

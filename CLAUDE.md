@@ -1,13 +1,16 @@
 # claude-vault-capture — agent context
 
-Automatically captures Claude Code sessions into an Obsidian vault on `SessionEnd`. A single curation path runs on every qualifying session: **Path A** (Sonnet) extracts one durable artifact or returns null (→ `Inbox/auto/`), retrying once on a non-deterministic null. Path B (the Haiku raw baseline → `Inbox/raw/`) was retired 2026-06-04 after the eval showed it didn't earn its keep — see `eval/experiments/FINDINGS.md`.
+Automatically captures Claude Code sessions into an Obsidian vault on `SessionEnd`. A single curation path runs on every qualifying session: **Path A** (Sonnet) extracts one durable artifact or returns null (→ `Inbox/auto/`). One resample covers BOTH non-deterministic reply failures — a `null` and an unparseable reply (`PATH_A_RESAMPLES`). Path B (the Haiku raw baseline → `Inbox/raw/`) was retired 2026-06-04 after the eval showed it didn't earn its keep — see `eval/experiments/FINDINGS.md`.
+
+**Delivery:** this repo is the upstream source. Users install the **Claude Code plugin** `claude-vault-capture@skills`, which vendors this code, registers its own `SessionEnd` hook, and keeps runtime state in `${CLAUDE_PLUGIN_DATA}` (not `eval/state/`). The standalone `install.sh` route below is the dev/rollback path — running both gives two hooks with disjoint dedup indexes, so every session is captured twice.
 
 ## How to run tests
 
 ```bash
 uv sync                # installs anthropic + the default dev group (pytest, pyyaml, ruff, pre-commit)
-uv run pytest          # 158 tests, no network (plus 1 opt-in live, skipped)
+uv run pytest          # full suite, no network (plus 1 opt-in live, skipped)
 CAPTURE_MOCK_SDK=1 uv run pytest -k failure_isolation   # specific test with mock SDK
+bash eval/run-fixtures.sh        # pipeline against recorded fixtures
 bash eval/run-install-smoke.sh   # installer smoke test (tmp dirs, no real writes)
 ```
 
@@ -36,13 +39,13 @@ session-end-capture.sh  →  curate.py (backgrounded, nohup)
 ```
 
 **Key files:**
-- `hooks/session-end-capture.sh` — entry point; reads stdin JSON, logs `SESSION_END_RECEIVED`, backgrounds `curate.py`. Returns in <200ms.
+- `hooks/session-end-capture.sh` — entry point; reads stdin JSON, logs `SESSION_END_RECEIVED`, backgrounds `curate.py`. Returns in <200ms. It refuses to run unconfigured (`CAPTURE_NOT_CONFIGURED`), refuses credential files that aren't mode 600 (`CAPTURE_TOKEN_FILE_PERMS`), and stamps `CAPTURE_DEPLOY <sha> ok|STALE_DEPLOY` per session. **Those markers in `~/.claude/hooks.log` are the only way to diagnose a silent no-capture** — check them first.
 - `hooks/curate.py` — full pipeline. All imports at function scope for fast startup. `render_transcript()` builds the model input: text plus compact `[TOOL]`/`[OUT]`/`[ERROR]` lines (commands, edit diffs, output heads, failures), budgeted so the enriched transcript stays under the token guard. Filters read the text-only `content`; only the model input is enriched.
 - `hooks/scrub.py` + `hooks/scrub_rules.py` — pure stdlib secret scrubber; runs twice (before API call, after).
 - `prompts/curation-system-prompt.md` — the only model-facing prompt; every change is a commit.
 - `eval/state/log.md` — JSON-lines eval log (gitignored); `eval/state/session-index.tsv` — dedup index.
 
-**Skill integrations** (installed by `install.sh`). The remaining patch file carries `__VAULT_DIR__` / `__REPO_DIR__` placeholders that the installer substitutes with the user's resolved absolute paths:
+**Skill integrations** (installed by `install.sh`; the plugin ships its own copy). The patch file carries a `__VAULT_DIR__` placeholder that the installer substitutes with the user's resolved vault path:
 - `/vault-save` skill (`skill-patches/vault-save.md`) — on-demand export of a Claude-generated markdown document to `<vault>/claude-docs/`. No model call; Claude writes the file directly with structured frontmatter (`source: claude-code-export`). Always installed. Auto-triggered when the user asks to save/export a document to their vault (via `~/.claude/CLAUDE.md` injection from `skill-patches/global-claude-md.vault-save-trigger.md`).
 
 **Inbox triage is out-of-scope for this repo.** Promoting/backlinking captured artifacts is handled by *external extensions* that consume the documented Inbox contract: they read `Inbox/auto/` and read-only `eval/state/{session-index.tsv,log.md,scrub-failures.md}`, and set `CAPTURE_EXCLUDED_COMMANDS` in `capture.env` to skip capturing their own workflow sessions. (`Inbox/raw/` is no longer written as of the Path B retirement; extensions must tolerate its absence.) The public installer never patches workflow skills — it only ships `/vault-save`.
@@ -52,7 +55,7 @@ session-end-capture.sh  →  curate.py (backgrounded, nohup)
 - **<200ms on the close path.** All model work is backgrounded. Nothing synchronous on `SessionEnd`.
 - **Curation failure is contained.** A Path A exception is caught in `run_capture` and logged as `error:<type>` — it must never write a partial file or abort the log append.
 - **Scrub runs twice.** On the transcript before any API call; on each model output before writing to disk.
-- **Title is always sanitized** before it appears in a filename, frontmatter, or wikilink.
+- **Every model-supplied frontmatter field is sanitized.** The transcript can carry prompt injection, so model output is hostile input: `sanitize_title()` before any filename/frontmatter/wikilink, `sanitize_type()` collapses anything off the allowlist to `decision`, `sanitize_tag()` slugs tags to `[a-z0-9-]`, and frontmatter scalars are YAML-quoted (an unquoted `Decision: …` title produced frontmatter Obsidian couldn't parse).
 - **Fence-stripping before JSON parsing.** Models sometimes wrap JSON in ` ```json…``` ` despite prompt instructions. `_strip_fences()` is applied to every model response before `json.loads()`.
 - **The transcript is always terminated.** `_invoke_model` appends `_TRANSCRIPT_TAIL` once, before dispatching to either transport, closing the delimiter and restating the JSON-or-null contract. Without it the prompt is an unfinished chat log and the model writes the conversation's next turn instead of curating — the cause of every `malformed_json` in the archive. Never send transcript text as the last thing in a prompt, and keep the append at the dispatch point so a new transport can't forget it.
 - **Salvage requires artifact shape.** `_salvage_artifact()` only accepts an object carrying `title`/`type`/`body`. The write path defaults every missing field, so an unshaped dict (e.g. a fabricated `{"file_path": …}`) would otherwise be written to `Inbox/` as an empty "untitled" note.
@@ -69,6 +72,7 @@ session-end-capture.sh  →  curate.py (backgrounded, nohup)
 | `duplicate` | session_id already present in session-index.tsv |
 | `model_returned_null` | Sonnet returned the literal string `null` on **every** attempt (initial call plus the one resample) |
 | `malformed_json` | at least one attempt was unparseable after fence-stripping and artifact salvage, and no attempt produced an artifact. Wins over `model_returned_null` in a mixed sequence, so a trailing null can't erase the unparseable reply from the log |
+| `transcript_missing` | the transcript file could not be read (logged rather than exiting silently, so the loss is visible to the no-capture alarm) |
 | `timeout` | a model call exceeded `CAPTURE_TIMEOUT_SECONDS` (default 30 s) |
 | `error:<ExcType>` | any other exception |
 
@@ -76,7 +80,7 @@ session-end-capture.sh  →  curate.py (backgrounded, nohup)
 
 - Python **3.11+** (floor: subscription-mode timeout relies on `asyncio.TimeoutError` aliasing the builtin, 3.11+). Dev venv is 3.14. `pyproject.toml` is the manifest; `uv sync` installs deps. Run via `uv run` or `.venv/bin/python3`.
 - **Paths are not hardcoded.** The repo root is derived from each file's own location (`__file__` / `${BASH_SOURCE[0]}`), so the checkout can live anywhere. The vault path comes from `CAPTURE_VAULT_DIR`, which `install.sh` resolves and writes to a gitignored `capture.env`; `session-end-capture.sh` sources that file and refuses to run (logs `CAPTURE_NOT_CONFIGURED`) if the vault is unset.
-- `ANTHROPIC_API_KEY` must be set (API-key mode). If absent in hook env, `session-end-capture.sh` reads `~/.claude_vault_token` as fallback.
+- `ANTHROPIC_API_KEY` must be set (API-key mode). Claude Code strips the hook environment, so an `export` in a shell profile does NOT reach the worker — `session-end-capture.sh` falls back to `~/.claude_vault_token`. **Credential files must be mode 600**; the hook refuses a group/other-readable file and logs `CAPTURE_TOKEN_FILE_PERMS` rather than using it. Same for `~/.claude_vault_oauth_token`.
 - `CAPTURE_USE_SUBSCRIPTION=1` — route the curation model call through the Claude Agent SDK (Claude Code runtime) so it bills to a Pro/Max subscription instead of a metered key. Auth via `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`; hook falls back to `~/.claude_vault_oauth_token`). Because `capture.env` is sourced with `set -a`, you can resolve the token from the **macOS Keychain** instead of a plaintext file — see the README's "Using your Claude Pro or Max subscription" section for the `security add-generic-password` + `find-generic-password` recipe. Requires `claude-agent-sdk` + the `claude` CLI. In this mode `cost_usd` is an *estimated* API-equivalent, not billed, and `max_tokens` is not enforced (runtime controls output). The model-call transport is the only difference — scrub/filter/parse/write are identical.
 - `CAPTURE_MOCK_SDK=1` — skip real API calls; use `eval/fixtures/mock-responses.json`.
 - `CAPTURE_MAX_EST_TOKENS` — override token ceiling (default 50 000).
