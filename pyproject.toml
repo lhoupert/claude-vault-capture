@@ -11,20 +11,20 @@ keywords = ["claude-code", "obsidian", "hooks", "knowledge-capture"]
 # Runtime dependency for the default (metered API-key) mode. Pinned to the tested
 # version; Dependabot (.github/dependabot.yml) proposes bumps.
 dependencies = [
-    "anthropic==0.105.2",
+    "anthropic==0.118.0",
 ]
 
 [project.optional-dependencies]
 # Route model calls through a Claude Max subscription instead of a metered key.
 # See README → "Using your Claude Max subscription instead of an API key".
-subscription = ["claude-agent-sdk==0.2.89"]
+subscription = ["claude-agent-sdk==0.2.126"]
 
 # Dev/test deps live in a dependency group (PEP 735), which `uv sync` installs by
 # default — so `uv run pytest` works out of the box. PyYAML is test-only: the
 # runtime parses frontmatter with stdlib regex and never imports yaml. Use
 # `uv sync --no-dev` for a lean, hook-only install (only `anthropic`).
 [dependency-groups]
-dev = ["pytest==9.0.3", "pyyaml==6.0.3", "ruff==0.15.16", "pre-commit==4.6.0"]
+dev = ["pytest==9.1.1", "pyyaml==6.0.3", "ruff==0.15.22", "pre-commit==4.6.1"]
 
 [project.urls]
 Repository = "https://github.com/lhoupert/claude-vault-capture"
